@@ -334,9 +334,9 @@ func (h *Handler) CreateQuote(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Free tier enforcement: max 3 quotes/month for non-Pro users
-	// TODO: once Stripe is integrated, check user's plan from profiles.plan column
+	// Dev bypass: in development, DEV_BYPASS_USER_ID gets unlimited access
 	profile, _ := h.db.GetProfile(r.Context(), user.ID)
-	isPro := profile != nil && profile.Plan == "pro"
+	isPro := profile != nil && profile.Plan == "pro" || h.cfg.IsDevBypassUser(user.ID)
 	if !isPro {
 		count, err := h.db.CountQuotesThisMonth(r.Context(), user.ID)
 		if err == nil && count >= 3 {
@@ -503,7 +503,7 @@ func (h *Handler) DuplicateQuote(w http.ResponseWriter, r *http.Request) {
 
 	// Free tier enforcement: same limit as CreateQuote
 	profile, _ := h.db.GetProfile(r.Context(), user.ID)
-	isPro := profile != nil && profile.Plan == "pro"
+	isPro := profile != nil && profile.Plan == "pro" || h.cfg.IsDevBypassUser(user.ID)
 	if !isPro {
 		count, err := h.db.CountQuotesThisMonth(r.Context(), user.ID)
 		if err == nil && count >= 3 {

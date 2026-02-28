@@ -40,6 +40,9 @@ type Config struct {
 
 	// CORS
 	AllowedOrigins []string
+
+	// Dev only: user ID that bypasses free tier limits (unlimited quotes, etc.)
+	DevBypassUserID string
 }
 
 // Load reads .env file (if present) and populates Config from environment variables.
@@ -64,6 +67,7 @@ func Load() (*Config, error) {
 		AppURL:                  getEnv("APP_URL", "http://localhost:8080"),
 		FrontendURL:             getEnv("FRONTEND_URL", "https://quote-flow-phi.vercel.app"),
 		QuoteLinkBaseURL:        getEnv("QUOTE_LINK_BASE_URL", "https://quote-flow-phi.vercel.app/q"),
+		DevBypassUserID:         getEnv("DEV_BYPASS_USER_ID", "4946c101-f0e4-4c6d-a094-012a6ff7775a"),
 	}
 
 	// Parse comma-separated allowed origins
@@ -79,6 +83,11 @@ func Load() (*Config, error) {
 
 func (c *Config) IsDevelopment() bool { return c.Env == "development" }
 func (c *Config) IsProduction() bool  { return c.Env == "production" }
+
+// IsDevBypassUser returns true if userID is the dev bypass user (only in development).
+func (c *Config) IsDevBypassUser(userID string) bool {
+	return c.IsDevelopment() && c.DevBypassUserID != "" && userID == c.DevBypassUserID
+}
 
 func getEnv(key, fallback string) string {
 	if val := os.Getenv(key); val != "" {
