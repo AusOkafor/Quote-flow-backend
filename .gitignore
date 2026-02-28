@@ -7,13 +7,20 @@
 
 # ─── Build Output ───
 bin/
+tmp/
 *.exe
+*.test
+__debug_bin
 
 # ─── Test Coverage ───
 coverage.out
 coverage.html
 
+# ─── Go ───
+vendor/
+
 # ─── IDE & Editor ───
+docs/
 .idea/
 .vscode/
 *.swp
