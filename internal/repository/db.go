@@ -1,0 +1,826 @@
+package repository
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"math"
+	"sort"
+	"strings"
+	"time"
+
+	postgrest "github.com/supabase-community/postgrest-go"
+	supa "github.com/supabase-community/supabase-go"
+	"quoteflow-backend/config"
+	"quoteflow-backend/internal/models"
+)
+
+// DB wraps the Supabase client and exposes all data access methods.
+type DB struct {
+	client *supa.Client
+	cfg    *config.Config
+}
+
+// New creates a new DB repository using the Supabase service role key
+// (bypasses RLS — use only on the server, never expose to clients).
+func New(cfg *config.Config) (*DB, error) {
+	client, err := supa.NewClient(cfg.SupabaseURL, cfg.SupabaseServiceRoleKey, &supa.ClientOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("creating supabase client: %w", err)
+	}
+	return &DB{client: client, cfg: cfg}, nil
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// HELPER
+// ─────────────────────────────────────────────────────────────────────────────
+
+func decode(raw []byte, dest interface{}) error {
+	return json.Unmarshal(raw, dest)
+}
+
+func defaultIfEmpty(s, def string) string {
+	if s == "" {
+		return def
+	}
+	return s
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PROFILE
+// ─────────────────────────────────────────────────────────────────────────────
+
+func (db *DB) GetProfile(ctx context.Context, userID string) (*models.Profile, error) {
+	raw, _, err := db.client.From("profiles").
+		Select("*", "exact", false).
+		Eq("user_id", userID).
+		Single().
+		Execute()
+	if err != nil {
+		return nil, fmt.Errorf("get profile: %w", err)
+	}
+	var p models.Profile
+	if err := decode(raw, &p); err != nil {
+		return nil, err
+	}
+	return &p, nil
+}
+
+func (db *DB) UpsertProfile(ctx context.Context, p *models.Profile) error {
+	p.UpdatedAt = time.Now()
+	row := map[string]interface{}{
+		"user_id":              p.UserID,
+		"business_name":        p.BusinessName,
+		"profession":           p.Profession,
+		"address":              p.Address,
+		"phone":                p.Phone,
+		"email_on_quote":       p.EmailOnQuote,
+		"brand_color":           p.BrandColor,
+		"default_currency":     p.DefaultCurrency,
+		"default_validity_days": p.DefaultValidity,
+		"default_deposit":      p.DefaultDeposit,
+		"default_revisions":    p.DefaultRevisions,
+		"default_notes":        p.DefaultNotes,
+		"default_payment":      p.DefaultPayment,
+		"tax_type":             p.TaxType,
+		"tax_rate":             p.TaxRate,
+		"tax_number":           p.TaxNumber,
+		"tax_exempt_default":   p.TaxExemptDefault,
+		"show_tax_breakdown":   p.ShowTaxBreakdown,
+		"plan":                 defaultIfEmpty(p.Plan, "free"),
+		"notify_accepted":      p.NotifyAccepted,
+		"notify_viewed":        p.NotifyViewed,
+		"notify_expiring":      p.NotifyExpiring,
+		"notify_weekly":        p.NotifyWeekly,
+		"updated_at":           p.UpdatedAt,
+	}
+	if p.LogoURL != nil && *p.LogoURL != "" {
+		row["logo_url"] = *p.LogoURL
+	} else {
+		row["logo_url"] = nil
+	}
+	if p.StripeCustomerID != "" {
+		row["stripe_customer_id"] = p.StripeCustomerID
+	}
+	raw, _, err := db.client.From("profiles").
+		Upsert(row, "user_id", "representation", "").
+		Execute()
+	if err != nil {
+		return fmt.Errorf("upsert profile: %w", err)
+	}
+	var results []models.Profile
+	if err := decode(raw, &results); err != nil {
+		return err
+	}
+	if len(results) > 0 {
+		*p = results[0]
+	}
+	return nil
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CLIENTS
+// ─────────────────────────────────────────────────────────────────────────────
+
+func (db *DB) ListClients(ctx context.Context, userID string) ([]models.Client, error) {
+	// Use the client_summary view to get stats in one query
+	raw, _, err := db.client.From("client_summary").
+		Select("*", "exact", false).
+		Eq("user_id", userID).
+		Order("created_at", &postgrest.OrderOpts{Ascending: false}).
+		Execute()
+	if err != nil {
+		return nil, fmt.Errorf("list clients: %w", err)
+	}
+	var clients []models.Client
+	if err := decode(raw, &clients); err != nil {
+		return nil, err
+	}
+	return clients, nil
+}
+
+func (db *DB) GetClient(ctx context.Context, id, userID string) (*models.Client, error) {
+	raw, _, err := db.client.From("client_summary").
+		Select("*", "exact", false).
+		Eq("id", id).
+		Eq("user_id", userID).
+		Single().
+		Execute()
+	if err != nil {
+		return nil, fmt.Errorf("get client: %w", err)
+	}
+	var c models.Client
+	return &c, decode(raw, &c)
+}
+
+func (db *DB) CreateClient(ctx context.Context, c *models.Client) error {
+	now := time.Now()
+	c.CreatedAt = now
+	c.UpdatedAt = now
+	// Use map to avoid sending empty ID (PostgreSQL rejects "" for UUID)
+	row := map[string]interface{}{
+		"user_id":    c.UserID,
+		"name":       c.Name,
+		"company":    c.Company,
+		"email":      c.Email,
+		"phone":      c.Phone,
+		"address":    c.Address,
+		"notes":      c.Notes,
+		"created_at": now,
+		"updated_at": now,
+	}
+	raw, _, err := db.client.From("clients").
+		Insert(row, false, "", "representation", "").
+		Execute()
+	if err != nil {
+		return fmt.Errorf("create client: %w", err)
+	}
+	var results []models.Client
+	if err := decode(raw, &results); err != nil {
+		return err
+	}
+	if len(results) > 0 {
+		*c = results[0]
+	}
+	return nil
+}
+
+func (db *DB) UpdateClient(ctx context.Context, c *models.Client) error {
+	c.UpdatedAt = time.Now()
+	_, _, err := db.client.From("clients").
+		Update(c, "*", "").
+		Eq("id", c.ID).
+		Eq("user_id", c.UserID).
+		Execute()
+	return err
+}
+
+func (db *DB) DeleteClient(ctx context.Context, id, userID string) error {
+	_, _, err := db.client.From("clients").
+		Delete("*", "").
+		Eq("id", id).
+		Eq("user_id", userID).
+		Execute()
+	return err
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// QUOTES
+// ─────────────────────────────────────────────────────────────────────────────
+
+func (db *DB) ListQuotes(ctx context.Context, userID string, statusFilter string, currencyFilter string) ([]models.Quote, error) {
+	q := db.client.From("quotes").
+		Select("*,client:clients(*)", "exact", false).
+		Eq("user_id", userID).
+		Order("created_at", &postgrest.OrderOpts{Ascending: false})
+
+	if statusFilter != "" && statusFilter != "all" {
+		q = q.Eq("status", statusFilter)
+	}
+	if currencyFilter != "" {
+		q = q.Eq("currency", currencyFilter)
+	}
+
+	raw, _, err := q.Execute()
+	if err != nil {
+		return nil, fmt.Errorf("list quotes: %w", err)
+	}
+
+	var quotes []models.Quote
+	return quotes, decode(raw, &quotes)
+}
+
+func (db *DB) GetQuote(ctx context.Context, id, userID string) (*models.QuoteWithDetails, error) {
+	raw, _, err := db.client.From("quotes").
+		Select("*,client:clients(*),line_items(*)", "exact", false).
+		Eq("id", id).
+		Eq("user_id", userID).
+		Single().
+		Execute()
+	if err != nil {
+		return nil, fmt.Errorf("get quote: %w", err)
+	}
+	var q models.QuoteWithDetails
+	return &q, decode(raw, &q)
+}
+
+// GetQuoteByShareToken loads a quote for the public viewer (no auth required).
+func (db *DB) GetQuoteByShareToken(ctx context.Context, token string) (*models.QuoteWithDetails, error) {
+	raw, _, err := db.client.From("quotes").
+		Select("*,client:clients(*),line_items(*)", "exact", false).
+		Eq("share_token", token).
+		Single().
+		Execute()
+	if err != nil {
+		return nil, fmt.Errorf("get quote by token: %w", err)
+	}
+	var q models.QuoteWithDetails
+	return &q, decode(raw, &q)
+}
+
+// NextQuoteNumber generates the next sequential quote number for a user
+// via a Postgres function to avoid race conditions.
+func (db *DB) NextQuoteNumber(ctx context.Context, userID string) (string, error) {
+	raw := db.client.Rpc("next_quote_number", "", map[string]interface{}{
+		"p_user_id": userID,
+	})
+	if raw == "" {
+		return "QF-001", nil
+	}
+	var result string
+	if err := json.Unmarshal([]byte(raw), &result); err != nil {
+		return "QF-001", nil
+	}
+	if result == "" {
+		return "QF-001", nil
+	}
+	return result, nil
+}
+
+// CountQuotesThisMonth returns how many quotes the user has created in the current calendar month.
+func (db *DB) CountQuotesThisMonth(ctx context.Context, userID string) (int, error) {
+	now := time.Now()
+	monthStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, now.Location())
+	raw, _, err := db.client.From("quotes").
+		Select("id", "exact", false).
+		Eq("user_id", userID).
+		Gte("created_at", monthStart.Format(time.RFC3339)).
+		Execute()
+	if err != nil {
+		return 0, err
+	}
+	var rows []struct{ ID string `json:"id"` }
+	if err := decode(raw, &rows); err != nil {
+		return 0, err
+	}
+	return len(rows), nil
+}
+
+func (db *DB) CreateQuote(ctx context.Context, q *models.Quote, items []models.LineItemInput) error {
+	now := time.Now()
+	q.CreatedAt = now
+	q.UpdatedAt = now
+	q.ExpiresAt = now.AddDate(0, 0, q.ValidityDays)
+
+	// Calculate totals from line items
+	var subtotal float64
+	for _, item := range items {
+		subtotal += item.Quantity * item.UnitPrice
+	}
+	q.Subtotal = math.Round(subtotal*100) / 100
+	if q.TaxExempt {
+		q.TaxAmount = 0
+	} else {
+		q.TaxAmount = math.Round(subtotal*q.TaxRate/100*100) / 100
+	}
+	q.Total = q.Subtotal + q.TaxAmount
+
+	// Use map to avoid sending empty id/share_token (PostgreSQL rejects "" for UUID)
+	row := map[string]interface{}{
+		"user_id":           q.UserID,
+		"client_id":         q.ClientID,
+		"quote_number":      q.QuoteNumber,
+		"title":             q.Title,
+		"status":            string(q.Status),
+		"currency":          q.Currency,
+		"subtotal":          q.Subtotal,
+		"tax_rate":          q.TaxRate,
+		"tax_exempt":        q.TaxExempt,
+		"tax_amount":        q.TaxAmount,
+		"total":             q.Total,
+		"validity_days":     q.ValidityDays,
+		"expires_at":        q.ExpiresAt,
+		"notes":             q.Notes,
+		"deposit":           q.Deposit,
+		"payment_method":    q.PaymentMethod,
+		"delivery_timeline":  q.DeliveryTimeline,
+		"revisions":         q.Revisions,
+		"require_signature": q.RequireSignature,
+		"track_views":       q.TrackViews,
+		"send_reminder":     q.SendReminder,
+		"created_at":        now,
+		"updated_at":        now,
+	}
+	raw, _, err := db.client.From("quotes").
+		Insert(row, false, "", "representation", "").
+		Execute()
+	if err != nil {
+		return fmt.Errorf("create quote: %w", err)
+	}
+	var results []models.Quote
+	if err := decode(raw, &results); err != nil || len(results) == 0 {
+		return fmt.Errorf("decoding created quote: %w", err)
+	}
+	*q = results[0]
+
+	// Insert line items — use maps to avoid struct serialization issues
+	liRows := make([]map[string]interface{}, 0, len(items))
+	for i, item := range items {
+		desc := strings.TrimSpace(item.Description)
+		if desc == "" {
+			desc = "Line item"
+		}
+		liRows = append(liRows, map[string]interface{}{
+			"quote_id":     q.ID,
+			"position":     i,
+			"description":  desc,
+			"quantity":     item.Quantity,
+			"unit_price":   item.UnitPrice,
+		})
+	}
+	if len(liRows) > 0 {
+		_, _, err = db.client.From("line_items").
+			Insert(liRows, false, "", "representation", "").
+			Execute()
+		if err != nil {
+			return fmt.Errorf("create line items: %w", err)
+		}
+	}
+	return nil
+}
+
+// UpdateQuote patches non-nil fields on a quote and optionally replaces all line items.
+func (db *DB) UpdateQuote(ctx context.Context, id, userID string, req *models.UpdateQuoteRequest) (*models.QuoteWithDetails, error) {
+	fields := map[string]interface{}{
+		"updated_at": time.Now(),
+	}
+	if req.Title != nil {
+		fields["title"] = *req.Title
+	}
+	if req.Currency != nil {
+		fields["currency"] = *req.Currency
+	}
+	if req.ValidityDays != nil {
+		fields["validity_days"] = *req.ValidityDays
+	}
+	if req.Notes != nil {
+		fields["notes"] = *req.Notes
+	}
+	if req.Deposit != nil {
+		fields["deposit"] = *req.Deposit
+	}
+	if req.PaymentMethod != nil {
+		fields["payment_method"] = *req.PaymentMethod
+	}
+	if req.DeliveryTimeline != nil {
+		fields["delivery_timeline"] = *req.DeliveryTimeline
+	}
+	if req.Revisions != nil {
+		fields["revisions"] = *req.Revisions
+	}
+	if req.TaxExempt != nil {
+		fields["tax_exempt"] = *req.TaxExempt
+	}
+	if req.TaxRate != nil {
+		fields["tax_rate"] = *req.TaxRate
+	}
+	if req.RequireSignature != nil {
+		fields["require_signature"] = *req.RequireSignature
+	}
+	if req.TrackViews != nil {
+		fields["track_views"] = *req.TrackViews
+	}
+	if req.SendReminder != nil {
+		fields["send_reminder"] = *req.SendReminder
+	}
+
+	// If line items are provided, recalculate totals
+	if len(req.LineItems) > 0 {
+		var subtotal float64
+		for _, item := range req.LineItems {
+			subtotal += item.Quantity * item.UnitPrice
+		}
+		fields["subtotal"] = math.Round(subtotal*100) / 100
+
+		taxExempt := false
+		if req.TaxExempt != nil {
+			taxExempt = *req.TaxExempt
+		}
+		taxRate := 0.0
+		if req.TaxRate != nil {
+			taxRate = *req.TaxRate
+		}
+
+		if taxExempt {
+			fields["tax_amount"] = 0.0
+		} else {
+			// If tax rate wasn't provided in the update, we need the existing value
+			if req.TaxRate == nil {
+				existing, err := db.GetQuote(ctx, id, userID)
+				if err != nil {
+					return nil, err
+				}
+				taxRate = existing.TaxRate
+				if req.TaxExempt == nil {
+					taxExempt = existing.TaxExempt
+				}
+			}
+			if taxExempt {
+				fields["tax_amount"] = 0.0
+			} else {
+				fields["tax_amount"] = math.Round(subtotal*taxRate/100*100) / 100
+			}
+		}
+		taxAmt, _ := fields["tax_amount"].(float64)
+		fields["total"] = fields["subtotal"].(float64) + taxAmt
+	}
+
+	// Recalculate expires_at if validity_days changed
+	if req.ValidityDays != nil {
+		fields["expires_at"] = time.Now().AddDate(0, 0, *req.ValidityDays)
+	}
+
+	_, _, err := db.client.From("quotes").
+		Update(fields, "*", "").
+		Eq("id", id).
+		Eq("user_id", userID).
+		Execute()
+	if err != nil {
+		return nil, fmt.Errorf("update quote: %w", err)
+	}
+
+	// If line items provided, delete old ones and insert new
+	if len(req.LineItems) > 0 {
+		_, _, _ = db.client.From("line_items").
+			Delete("*", "").
+			Eq("quote_id", id).
+			Execute()
+
+		type lineItemRow struct {
+			QuoteID     string  `json:"quote_id"`
+			Position    int     `json:"position"`
+			Description string  `json:"description"`
+			Quantity    float64 `json:"quantity"`
+			UnitPrice   float64 `json:"unit_price"`
+		}
+		liRows := make([]lineItemRow, len(req.LineItems))
+		for i, item := range req.LineItems {
+			liRows[i] = lineItemRow{
+				QuoteID:     id,
+				Position:    i,
+				Description: item.Description,
+				Quantity:    item.Quantity,
+				UnitPrice:   item.UnitPrice,
+			}
+		}
+		_, _, err = db.client.From("line_items").
+			Insert(liRows, false, "", "representation", "").
+			Execute()
+		if err != nil {
+			return nil, fmt.Errorf("update line items: %w", err)
+		}
+	}
+
+	return db.GetQuote(ctx, id, userID)
+}
+
+// MarkQuoteAsPaid sets paid_at on an accepted quote. Returns error if not accepted.
+func (db *DB) MarkQuoteAsPaid(ctx context.Context, id, userID string) (*models.QuoteWithDetails, error) {
+	quote, err := db.GetQuote(ctx, id, userID)
+	if err != nil {
+		return nil, err
+	}
+	if quote.Status != models.StatusAccepted {
+		return nil, fmt.Errorf("quote must be accepted before marking as paid")
+	}
+	if quote.PaidAt != nil {
+		return quote, nil // already paid
+	}
+	now := time.Now()
+	_, _, err = db.client.From("quotes").
+		Update(map[string]interface{}{"paid_at": now, "updated_at": now}, "*", "").
+		Eq("id", id).
+		Eq("user_id", userID).
+		Eq("status", "accepted").
+		Execute()
+	if err != nil {
+		return nil, fmt.Errorf("mark paid: %w", err)
+	}
+	return db.GetQuote(ctx, id, userID)
+}
+
+func (db *DB) UpdateQuoteStatus(ctx context.Context, id, userID string, status models.QuoteStatus) error {
+	update := map[string]interface{}{
+		"status":     string(status),
+		"updated_at": time.Now(),
+	}
+	if status == models.StatusAccepted {
+		now := time.Now()
+		update["accepted_at"] = now
+	}
+	if status == models.StatusSent {
+		now := time.Now()
+		update["sent_at"] = now
+	}
+	_, _, err := db.client.From("quotes").
+		Update(update, "*", "").
+		Eq("id", id).
+		Eq("user_id", userID).
+		Execute()
+	return err
+}
+
+func (db *DB) DuplicateQuote(ctx context.Context, id, userID string) (*models.Quote, error) {
+	// Fetch original with line items
+	original, err := db.GetQuote(ctx, id, userID)
+	if err != nil {
+		return nil, err
+	}
+
+	// New quote number
+	newNum, err := db.NextQuoteNumber(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Build copy
+	newQuote := models.Quote{
+		UserID:           original.UserID,
+		ClientID:         original.ClientID,
+		QuoteNumber:      newNum,
+		Title:            original.Title + " (Copy)",
+		Status:           models.StatusDraft,
+		Currency:         original.Currency,
+		ValidityDays:     original.ValidityDays,
+		Notes:            original.Notes,
+		Deposit:          original.Deposit,
+		PaymentMethod:    original.PaymentMethod,
+		DeliveryTimeline: original.DeliveryTimeline,
+		Revisions:        original.Revisions,
+		TaxExempt:        original.TaxExempt,
+		TaxRate:          original.TaxRate,
+		RequireSignature: original.RequireSignature,
+		TrackViews:       original.TrackViews,
+		SendReminder:     original.SendReminder,
+	}
+
+	// Build line item inputs from original
+	liInputs := make([]models.LineItemInput, len(original.LineItems))
+	for i, li := range original.LineItems {
+		liInputs[i] = models.LineItemInput{
+			Description: li.Description,
+			Quantity:    li.Quantity,
+			UnitPrice:   li.UnitPrice,
+		}
+	}
+
+	return &newQuote, db.CreateQuote(ctx, &newQuote, liInputs)
+}
+
+// IncrementViewCount atomically bumps the view counter via a Supabase RPC function.
+// The SQL function increment_view_count(quote_id uuid) is defined in 001_init.sql.
+func (db *DB) IncrementViewCount(ctx context.Context, quoteID string) error {
+	db.client.Rpc("increment_view_count", "", map[string]interface{}{
+		"quote_id": quoteID,
+	})
+	return nil
+}
+
+func (db *DB) AcceptQuote(ctx context.Context, token string, sigName string) (*models.Quote, error) {
+	now := time.Now()
+	upd := map[string]interface{}{
+		"status":      "accepted",
+		"accepted_at": now,
+		"updated_at":  now,
+	}
+	if sigName != "" {
+		upd["accepted_by_name"] = strings.TrimSpace(sigName)
+	}
+	raw, _, err := db.client.From("quotes").
+		Update(upd, "*", "").
+		Eq("share_token", token).
+		Eq("status", "sent").
+		Execute()
+	if err != nil {
+		return nil, fmt.Errorf("accept quote: %w", err)
+	}
+	var results []models.Quote
+	if err := decode(raw, &results); err != nil || len(results) == 0 {
+		return nil, fmt.Errorf("quote not found, already accepted, or expired")
+	}
+	return &results[0], nil
+}
+
+func (db *DB) DeleteQuote(ctx context.Context, id, userID string) error {
+	_, _, err := db.client.From("quotes").
+		Delete("*", "").
+		Eq("id", id).
+		Eq("user_id", userID).
+		Execute()
+	return err
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DASHBOARD STATS
+// ─────────────────────────────────────────────────────────────────────────────
+
+func (db *DB) GetDashboardStats(ctx context.Context, userID string, currencyFilter string) (*models.DashboardStats, error) {
+	// Fetch currencies used (distinct) for tab buttons
+	curRaw, _, err := db.client.From("quotes").
+		Select("currency", "exact", false).
+		Eq("user_id", userID).
+		Execute()
+	if err != nil {
+		return nil, err
+	}
+	var curRows []struct{ Currency string `json:"currency"` }
+	if err := decode(curRaw, &curRows); err != nil {
+		return nil, err
+	}
+	seen := make(map[string]bool)
+	var currenciesUsed []string
+	for _, r := range curRows {
+		if r.Currency != "" && !seen[r.Currency] {
+			seen[r.Currency] = true
+			currenciesUsed = append(currenciesUsed, r.Currency)
+		}
+	}
+	// Sort for consistent tab order: JMD, USD, TTD, BBD
+	order := map[string]int{"JMD": 0, "USD": 1, "TTD": 2, "BBD": 3}
+	sort.Slice(currenciesUsed, func(i, j int) bool {
+		return order[currenciesUsed[i]] < order[currenciesUsed[j]]
+	})
+
+	// Build quotes query
+	q := db.client.From("quotes").
+		Select("status,total,currency,created_at,accepted_at", "exact", false).
+		Eq("user_id", userID).
+		Gte("created_at", time.Now().AddDate(0, -12, 0).Format(time.RFC3339))
+	if currencyFilter != "" {
+		q = q.Eq("currency", currencyFilter)
+	}
+	raw, _, err := q.Execute()
+	if err != nil {
+		return nil, err
+	}
+
+	type row struct {
+		Status     string     `json:"status"`
+		Total      float64    `json:"total"`
+		Currency   string     `json:"currency"`
+		CreatedAt  time.Time  `json:"created_at"`
+		AcceptedAt *time.Time `json:"accepted_at"`
+	}
+	var rows []row
+	if err := decode(raw, &rows); err != nil {
+		return nil, err
+	}
+
+	now := time.Now()
+	thisMonthStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, now.Location())
+	lastMonthStart := thisMonthStart.AddDate(0, -1, 0)
+
+	stats := &models.DashboardStats{CurrenciesUsed: currenciesUsed}
+	for _, r := range rows {
+		switch r.Status {
+		case "draft":
+			stats.DraftCount++
+		case "sent":
+			stats.SentCount++
+		case "accepted":
+			stats.AcceptedCount++
+		case "expired":
+			stats.ExpiredCount++
+		}
+		stats.TotalQuotesAllTime++
+
+		if r.CreatedAt.After(thisMonthStart) {
+			stats.QuotesCreatedThisMonth++
+			stats.TotalQuotedThisMonth += r.Total
+			if r.Status == "accepted" {
+				stats.QuotesAcceptedThisMonth++
+			}
+		} else if r.CreatedAt.After(lastMonthStart) {
+			stats.TotalQuotedLastMonth += r.Total
+			if r.Status == "accepted" {
+				stats.QuotesAcceptedLastMonth++
+			}
+		}
+	}
+
+	// When "All" (no currency filter): zero out money fields — mixing currencies is meaningless
+	if currencyFilter == "" {
+		stats.TotalQuotedThisMonth = 0
+		stats.TotalQuotedLastMonth = 0
+		stats.QuotedChangePercent = 0
+		stats.AvgQuoteValue = 0
+	} else {
+		// Change percent
+		if stats.TotalQuotedLastMonth > 0 {
+			stats.QuotedChangePercent = math.Round(
+				(stats.TotalQuotedThisMonth-stats.TotalQuotedLastMonth)/stats.TotalQuotedLastMonth*100,
+			)
+		}
+		// Avg quote value
+		if stats.TotalQuotesAllTime > 0 {
+			var totalAll float64
+			for _, r := range rows {
+				totalAll += r.Total
+			}
+			stats.AvgQuoteValue = math.Round(totalAll/float64(stats.TotalQuotesAllTime)*100) / 100
+		}
+	}
+
+	// Acceptance rate (sent + accepted out of all non-draft)
+	nonDraft := stats.SentCount + stats.AcceptedCount + stats.ExpiredCount
+	if nonDraft > 0 {
+		stats.AcceptanceRate = math.Round(float64(stats.AcceptedCount)/float64(nonDraft)*100*10) / 10
+	}
+
+	// Recent activity
+	stats.RecentActivity, _ = db.GetRecentActivity(ctx, userID, 10)
+
+	return stats, nil
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ACTIVITY / EVENTS
+// ─────────────────────────────────────────────────────────────────────────────
+
+func (db *DB) LogEvent(ctx context.Context, userID, quoteID, eventType, message string) error {
+	row := map[string]interface{}{
+		"user_id":     userID,
+		"quote_id":    quoteID,
+		"event_type":  eventType,
+		"message":     message,
+		"occurred_at": time.Now(),
+	}
+	_, _, err := db.client.From("quote_events").
+		Insert(row, false, "", "representation", "").
+		Execute()
+	return err
+}
+
+func (db *DB) GetRecentActivity(ctx context.Context, userID string, limit int) ([]models.ActivityItem, error) {
+	raw, _, err := db.client.From("quote_events").
+		Select("*", "exact", false).
+		Eq("user_id", userID).
+		Order("occurred_at", &postgrest.OrderOpts{Ascending: false}).
+		Limit(limit, "").
+		Execute()
+	if err != nil {
+		return nil, err
+	}
+	type eventRow struct {
+		ID         string    `json:"id"`
+		QuoteID    string    `json:"quote_id"`
+		EventType  string    `json:"event_type"`
+		Message    string    `json:"message"`
+		OccurredAt time.Time `json:"occurred_at"`
+	}
+	var events []eventRow
+	if err := decode(raw, &events); err != nil {
+		return nil, err
+	}
+	items := make([]models.ActivityItem, len(events))
+	for i, e := range events {
+		items[i] = models.ActivityItem{
+			ID:         e.ID,
+			Type:       e.EventType,
+			Message:    e.Message,
+			QuoteID:    e.QuoteID,
+			OccurredAt: e.OccurredAt,
+		}
+	}
+	return items, nil
+}

@@ -1,0 +1,304 @@
+package models
+
+import (
+	"time"
+)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// USER
+// ─────────────────────────────────────────────────────────────────────────────
+
+// User represents an authenticated QuoteFlow account.
+// The ID maps directly to Supabase Auth's user UUID.
+type User struct {
+	ID        string    `json:"id" db:"id"`
+	Email     string    `json:"email" db:"email"`
+	CreatedAt time.Time `json:"created_at" db:"created_at"`
+	UpdatedAt time.Time `json:"updated_at" db:"updated_at"`
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PROFILE / SETTINGS (per user, one row)
+// ─────────────────────────────────────────────────────────────────────────────
+
+type Profile struct {
+	ID               string    `json:"id" db:"id"`
+	UserID           string    `json:"user_id" db:"user_id"`
+	BusinessName     string    `json:"business_name" db:"business_name"`
+	Profession       string    `json:"profession" db:"profession"`
+	Address          string    `json:"address" db:"address"`
+	Phone            string    `json:"phone" db:"phone"`
+	EmailOnQuote     string    `json:"email_on_quote" db:"email_on_quote"`
+	LogoURL          *string   `json:"logo_url" db:"logo_url"`
+	BrandColor       string    `json:"brand_color" db:"brand_color"`
+	DefaultCurrency  string    `json:"default_currency" db:"default_currency"`
+	DefaultValidity  int       `json:"default_validity_days" db:"default_validity_days"`
+	DefaultDeposit   string    `json:"default_deposit" db:"default_deposit"`
+	DefaultRevisions string    `json:"default_revisions" db:"default_revisions"`
+	DefaultNotes     string    `json:"default_notes" db:"default_notes"`
+	DefaultPayment   string    `json:"default_payment" db:"default_payment"`
+	TaxType          string    `json:"tax_type" db:"tax_type"`
+	TaxRate          float64   `json:"tax_rate" db:"tax_rate"`
+	TaxNumber        string    `json:"tax_number" db:"tax_number"`
+	TaxExemptDefault bool      `json:"tax_exempt_default" db:"tax_exempt_default"`
+	ShowTaxBreakdown bool      `json:"show_tax_breakdown" db:"show_tax_breakdown"`
+	// Billing
+	Plan             string `json:"plan" db:"plan"`                           // "free" or "pro"
+	StripeCustomerID string `json:"stripe_customer_id,omitempty" db:"stripe_customer_id"`
+	// Notification preferences
+	NotifyAccepted  bool `json:"notify_accepted" db:"notify_accepted"`
+	NotifyViewed    bool `json:"notify_viewed" db:"notify_viewed"`
+	NotifyExpiring  bool `json:"notify_expiring" db:"notify_expiring"`
+	NotifyWeekly    bool `json:"notify_weekly" db:"notify_weekly"`
+	CreatedAt       time.Time `json:"created_at" db:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at" db:"updated_at"`
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CLIENT
+// ─────────────────────────────────────────────────────────────────────────────
+
+type Client struct {
+	ID        string    `json:"id" db:"id"`
+	UserID    string    `json:"user_id" db:"user_id"`
+	Name      string    `json:"name" db:"name"`
+	Company   string    `json:"company" db:"company"`
+	Email     string    `json:"email" db:"email"`
+	Phone     string    `json:"phone" db:"phone"`
+	Address   string    `json:"address" db:"address"`
+	Notes     string    `json:"notes" db:"notes"`
+	CreatedAt time.Time `json:"created_at" db:"created_at"`
+	UpdatedAt time.Time `json:"updated_at" db:"updated_at"`
+
+	// Computed / joined fields (not stored)
+	QuoteCount     int     `json:"quote_count,omitempty" db:"-"`
+	TotalQuoted    float64 `json:"total_quoted,omitempty" db:"-"`
+	AcceptanceRate float64 `json:"acceptance_rate,omitempty" db:"-"`
+}
+
+// CreateClientRequest is the payload for POST /clients
+type CreateClientRequest struct {
+	Name    string `json:"name" validate:"required,min=1"`
+	Company string `json:"company"`
+	Email   string `json:"email" validate:"required,email"`
+	Phone   string `json:"phone"`
+	Address string `json:"address"`
+	Notes   string `json:"notes"`
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// QUOTE
+// ─────────────────────────────────────────────────────────────────────────────
+
+// QuoteStatus is the lifecycle state of a quote.
+type QuoteStatus string
+
+const (
+	StatusDraft    QuoteStatus = "draft"
+	StatusSent     QuoteStatus = "sent"
+	StatusAccepted QuoteStatus = "accepted"
+	StatusExpired  QuoteStatus = "expired"
+	StatusDeclined QuoteStatus = "declined"
+)
+
+type Quote struct {
+	ID           string      `json:"id" db:"id"`
+	UserID       string      `json:"user_id" db:"user_id"`
+	ClientID     string      `json:"client_id" db:"client_id"`
+	QuoteNumber  string      `json:"quote_number" db:"quote_number"`   // e.g. "QF-019"
+	Title        string      `json:"title" db:"title"`
+	Status       QuoteStatus `json:"status" db:"status"`
+	Currency     string      `json:"currency" db:"currency"`           // JMD, USD, TTD, BBD
+	Subtotal     float64     `json:"subtotal" db:"subtotal"`
+	TaxRate      float64     `json:"tax_rate" db:"tax_rate"`
+	TaxExempt    bool        `json:"tax_exempt" db:"tax_exempt"`
+	TaxAmount    float64     `json:"tax_amount" db:"tax_amount"`
+	Total        float64     `json:"total" db:"total"`
+	ValidityDays int         `json:"validity_days" db:"validity_days"`
+	ExpiresAt    time.Time   `json:"expires_at" db:"expires_at"`
+	Notes        string      `json:"notes" db:"notes"`
+	// Terms
+	Deposit          string `json:"deposit" db:"deposit"`
+	PaymentMethod    string `json:"payment_method" db:"payment_method"`
+	DeliveryTimeline string `json:"delivery_timeline" db:"delivery_timeline"`
+	Revisions        string `json:"revisions" db:"revisions"`
+	// Options
+	RequireSignature bool `json:"require_signature" db:"require_signature"`
+	TrackViews       bool `json:"track_views" db:"track_views"`
+	SendReminder     bool `json:"send_reminder" db:"send_reminder"`
+	// Tracking
+	ViewCount       int        `json:"view_count" db:"view_count"`
+	LastViewedAt    *time.Time `json:"last_viewed_at" db:"last_viewed_at"`
+	AcceptedAt      *time.Time `json:"accepted_at" db:"accepted_at"`
+	AcceptedByName  string     `json:"accepted_by_name,omitempty" db:"accepted_by_name"`
+	PaidAt          *time.Time `json:"paid_at,omitempty" db:"paid_at"`
+	SentAt          *time.Time `json:"sent_at" db:"sent_at"`
+	// Share
+	ShareToken string `json:"share_token" db:"share_token"` // unique token for public link
+	CreatedAt  time.Time  `json:"created_at" db:"created_at"`
+	UpdatedAt  time.Time  `json:"updated_at" db:"updated_at"`
+
+	// Joined fields
+	Client    *Client    `json:"client,omitempty" db:"-"`
+	LineItems []LineItem `json:"line_items,omitempty" db:"-"`
+}
+
+// QuoteWithDetails is returned on GET /quotes/:id with client + line items attached.
+type QuoteWithDetails struct {
+	Quote
+	Client    Client     `json:"client"`
+	LineItems []LineItem `json:"line_items"`
+}
+
+// CreateQuoteRequest is the payload for POST /quotes
+type CreateQuoteRequest struct {
+	ClientID         string     `json:"client_id" validate:"required,uuid"`
+	Title            string     `json:"title" validate:"required,min=1"`
+	Currency         string     `json:"currency" validate:"required,oneof=JMD USD TTD BBD"`
+	ValidityDays     int        `json:"validity_days" validate:"required,min=1,max=365"`
+	Notes            string     `json:"notes"`
+	Deposit          string     `json:"deposit"`
+	PaymentMethod    string     `json:"payment_method"`
+	DeliveryTimeline string     `json:"delivery_timeline"`
+	Revisions        string     `json:"revisions"`
+	TaxExempt        bool       `json:"tax_exempt"`
+	TaxRate          float64    `json:"tax_rate"`
+	RequireSignature bool       `json:"require_signature"`
+	TrackViews       bool       `json:"track_views"`
+	SendReminder     bool       `json:"send_reminder"`
+	LineItems        []LineItemInput `json:"line_items" validate:"required,min=1,dive"`
+}
+
+// UpdateQuoteRequest is the payload for PATCH /quotes/:id
+type UpdateQuoteRequest struct {
+	Title            *string          `json:"title"`
+	Currency         *string          `json:"currency"`
+	ValidityDays     *int             `json:"validity_days"`
+	Notes            *string          `json:"notes"`
+	Deposit          *string          `json:"deposit"`
+	PaymentMethod    *string          `json:"payment_method"`
+	DeliveryTimeline *string          `json:"delivery_timeline"`
+	Revisions        *string          `json:"revisions"`
+	TaxExempt        *bool            `json:"tax_exempt"`
+	TaxRate          *float64         `json:"tax_rate"`
+	RequireSignature *bool            `json:"require_signature"`
+	TrackViews       *bool            `json:"track_views"`
+	SendReminder     *bool            `json:"send_reminder"`
+	LineItems        []LineItemInput  `json:"line_items"`
+}
+
+// SendQuoteRequest is the payload for POST /quotes/:id/send
+type SendQuoteRequest struct {
+	Channel string `json:"channel" validate:"required,oneof=email whatsapp link"`
+	// Email-specific (required when channel=email)
+	RecipientEmail string `json:"recipient_email"`
+	// WhatsApp-specific (required when channel=whatsapp)
+	RecipientPhone string `json:"recipient_phone"`
+	// Optional custom message
+	Message string `json:"message"`
+}
+
+// AcceptQuoteRequest is the payload for POST /q/:token/accept (public endpoint)
+type AcceptQuoteRequest struct {
+	SignatureName string `json:"signature_name"` // printed name for e-signature
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// LINE ITEM
+// ─────────────────────────────────────────────────────────────────────────────
+
+type LineItem struct {
+	ID          string  `json:"id" db:"id"`
+	QuoteID     string  `json:"quote_id" db:"quote_id"`
+	Position    int     `json:"position" db:"position"`
+	Description string  `json:"description" db:"description"`
+	Quantity    float64 `json:"quantity" db:"quantity"`
+	UnitPrice   float64 `json:"unit_price" db:"unit_price"`
+	Total       float64 `json:"total" db:"total"` // quantity * unit_price
+}
+
+// LineItemInput is used in create/update requests
+type LineItemInput struct {
+	Description string  `json:"description"` // empty ok; backend uses "Line item" fallback
+	Quantity    float64 `json:"quantity" validate:"required,min=0"`
+	UnitPrice   float64 `json:"unit_price" validate:"required,min=0"`
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DASHBOARD / ANALYTICS
+// ─────────────────────────────────────────────────────────────────────────────
+
+type DashboardStats struct {
+	TotalQuotedThisMonth float64 `json:"total_quoted_this_month"`
+	TotalQuotedLastMonth float64 `json:"total_quoted_last_month"`
+	QuotedChangePercent  float64 `json:"quoted_change_percent"`
+
+	QuotesAcceptedThisMonth int     `json:"quotes_accepted_this_month"`
+	QuotesAcceptedLastMonth int     `json:"quotes_accepted_last_month"`
+
+	AcceptanceRate     float64 `json:"acceptance_rate"`
+	AvgQuoteValue      float64 `json:"avg_quote_value"`
+
+	TotalQuotesAllTime     int `json:"total_quotes_all_time"`
+	QuotesCreatedThisMonth int `json:"quotes_created_this_month"`
+	DraftCount             int `json:"draft_count"`
+	SentCount             int `json:"sent_count"`
+	AcceptedCount         int `json:"accepted_count"`
+	ExpiredCount          int `json:"expired_count"`
+
+	// Currencies the user has used (for tab buttons). Empty = no tabs.
+	CurrenciesUsed []string `json:"currencies_used"`
+
+	// Recent activity feed items
+	RecentActivity []ActivityItem `json:"recent_activity"`
+}
+
+type ActivityItem struct {
+	ID          string    `json:"id"`
+	Type        string    `json:"type"` // accepted | viewed | expiring | created | sent
+	Message     string    `json:"message"`
+	QuoteID     string    `json:"quote_id,omitempty"`
+	QuoteNumber string    `json:"quote_number,omitempty"`
+	ClientName  string    `json:"client_name,omitempty"`
+	OccurredAt  time.Time `json:"occurred_at"`
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// AUTH
+// ─────────────────────────────────────────────────────────────────────────────
+
+type RegisterRequest struct {
+	Email    string `json:"email" validate:"required,email"`
+	Password string `json:"password" validate:"required,min=8"`
+	Name     string `json:"name" validate:"required,min=1"`
+}
+
+type LoginRequest struct {
+	Email    string `json:"email" validate:"required,email"`
+	Password string `json:"password" validate:"required"`
+}
+
+type AuthResponse struct {
+	AccessToken  string `json:"access_token"`
+	RefreshToken string `json:"refresh_token"`
+	User         User   `json:"user"`
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// API RESPONSE WRAPPERS
+// ─────────────────────────────────────────────────────────────────────────────
+
+type APIResponse struct {
+	Success bool        `json:"success"`
+	Data    interface{} `json:"data,omitempty"`
+	Error   string      `json:"error,omitempty"`
+	Message string      `json:"message,omitempty"`
+}
+
+type PaginatedResponse struct {
+	Success bool        `json:"success"`
+	Data    interface{} `json:"data"`
+	Total   int         `json:"total"`
+	Page    int         `json:"page"`
+	Limit   int         `json:"limit"`
+}

@@ -1,0 +1,19 @@
+# Air — Live reload for Go
+# Install: go install github.com/air-verse/air@latest
+# Run:     make dev
+
+root = "."
+tmp_dir = "tmp"
+
+[build]
+  cmd = "go build -o ./tmp/main ./cmd/server/main.go"
+  bin = "./tmp/main"
+  include_ext = ["go", "mod"]
+  exclude_dir  = ["tmp", "bin", "vendor"]
+  delay = 500
+
+[log]
+  time = true
+
+[color]
+  app = "green"
