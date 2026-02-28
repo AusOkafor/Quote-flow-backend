@@ -277,14 +277,16 @@ func (db *DB) NextQuoteNumber(ctx context.Context, userID string) (string, error
 	return result, nil
 }
 
-// CountQuotesThisMonth returns how many quotes the user has created in the current calendar month.
+// CountQuotesThisMonth returns how many quotes the user has created or duplicated in the current calendar month.
+// Uses quote_events so that deleting a quote does not free up a slot (prevents create-delete-create abuse).
 func (db *DB) CountQuotesThisMonth(ctx context.Context, userID string) (int, error) {
 	now := time.Now()
 	monthStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, now.Location())
-	raw, _, err := db.client.From("quotes").
+	raw, _, err := db.client.From("quote_events").
 		Select("id", "exact", false).
 		Eq("user_id", userID).
-		Gte("created_at", monthStart.Format(time.RFC3339)).
+		In("event_type", []string{"created", "duplicated"}).
+		Gte("occurred_at", monthStart.Format(time.RFC3339)).
 		Execute()
 	if err != nil {
 		return 0, err
@@ -725,7 +727,6 @@ func (db *DB) GetDashboardStats(ctx context.Context, userID string, currencyFilt
 		stats.TotalQuotesAllTime++
 
 		if r.CreatedAt.After(thisMonthStart) {
-			stats.QuotesCreatedThisMonth++
 			stats.TotalQuotedThisMonth += r.Total
 			if r.Status == "accepted" {
 				stats.QuotesAcceptedThisMonth++
@@ -760,6 +761,9 @@ func (db *DB) GetDashboardStats(ctx context.Context, userID string, currencyFilt
 			stats.AvgQuoteValue = math.Round(totalAll/float64(stats.TotalQuotesAllTime)*100) / 100
 		}
 	}
+
+	// Quotes created this month: use quote_events so it matches free tier limit (deletion doesn't free a slot)
+	stats.QuotesCreatedThisMonth, _ = db.CountQuotesThisMonth(ctx, userID)
 
 	// Acceptance rate (sent + accepted out of all non-draft)
 	nonDraft := stats.SentCount + stats.AcceptedCount + stats.ExpiredCount
