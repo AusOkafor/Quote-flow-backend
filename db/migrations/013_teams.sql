@@ -42,7 +42,9 @@ BEGIN
 END $$;
 
 -- Update client_summary view to include team_id for filtering
-CREATE OR REPLACE VIEW client_summary AS
+-- Must DROP first: CREATE OR REPLACE cannot change column order/names
+DROP VIEW IF EXISTS client_summary CASCADE;
+CREATE VIEW client_summary AS
 SELECT
     c.id,
     c.user_id,

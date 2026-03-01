@@ -407,7 +407,12 @@ func (h *Handler) CreateAPIKey(w http.ResponseWriter, r *http.Request) {
 	keyHash := hex.EncodeToString(hash[:])
 	created, err := h.db.CreateAPIKey(r.Context(), user.ID, req.Name, keyHash)
 	if err != nil {
-		h.err(w, http.StatusInternalServerError, "failed to create API key")
+		errMsg := err.Error()
+		if h.cfg.IsDevelopment() {
+			h.err(w, http.StatusInternalServerError, "failed to create API key: "+errMsg)
+		} else {
+			h.err(w, http.StatusInternalServerError, "failed to create API key")
+		}
 		return
 	}
 	h.created(w, models.CreateAPIKeyResponse{
