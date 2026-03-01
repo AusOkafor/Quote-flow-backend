@@ -130,6 +130,67 @@ func (n *NotificationService) SendQuoteViewedNotification(quote *models.Quote, c
 	return n.sendEmail(freelancerEmail, subject, html)
 }
 
+// SendPaymentReceivedNotification notifies the freelancer that a payment was received.
+func (n *NotificationService) SendPaymentReceivedNotification(quote *models.QuoteWithDetails, payment *models.Payment, freelancerEmail string) error {
+	if freelancerEmail == "" {
+		return nil
+	}
+	typeLabel := map[string]string{
+		"full":    "Full Payment",
+		"deposit": "Deposit",
+		"balance": "Final Balance",
+	}[string(payment.PaymentType)]
+	if typeLabel == "" {
+		typeLabel = "Payment"
+	}
+	processorLabel := map[string]string{
+		"stripe": "Stripe",
+		"paypal": "PayPal",
+		"wipay":  "WiPay",
+	}[string(payment.Processor)]
+	if processorLabel == "" {
+		processorLabel = string(payment.Processor)
+	}
+
+	appURL := n.cfg.AppURL
+	if appURL == "" {
+		appURL = "https://quoteflow.app"
+	}
+
+	html := fmt.Sprintf(`
+<div style="font-family:sans-serif;max-width:560px;margin:0 auto;padding:32px;">
+  <h2 style="color:#2DAB6F;margin-bottom:8px;">💰 Payment Received!</h2>
+  <p style="color:#555;font-size:15px;line-height:1.6;margin-bottom:20px;">
+    <strong>%s</strong> has paid the <strong>%s</strong>
+    for quote <strong>%s — %s</strong> via <strong>%s</strong>.
+  </p>
+  <div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:20px;margin-bottom:24px;">
+    <table style="width:100%%;font-size:14px;color:#374151;">
+      <tr><td>Amount paid</td>    <td align="right"><strong>%s %.2f</strong></td></tr>
+      <tr><td>QuoteFlow fee (0.7%%)</td><td align="right" style="color:#9ca3af;">-%s %.2f</td></tr>
+      <tr style="border-top:1px solid #d1fae5;">
+        <td><strong>Net to you</strong></td>
+        <td align="right"><strong style="color:#16a34a;">%s %.2f</strong></td>
+      </tr>
+    </table>
+  </div>
+  <a href="%s/app" style="display:inline-block;background:#2DAB6F;color:#fff;padding:13px 28px;
+     border-radius:8px;text-decoration:none;font-weight:600;font-size:15px;">
+    View in QuoteFlow →
+  </a>
+</div>`,
+		quote.Client.Name, typeLabel, quote.QuoteNumber, quote.Title, processorLabel,
+		payment.Currency, payment.Amount,
+		payment.Currency, payment.PlatformFee,
+		payment.Currency, payment.NetAmount,
+		appURL,
+	)
+
+	subject := fmt.Sprintf("💰 %s paid %s %.2f — %s",
+		quote.Client.Name, payment.Currency, payment.Amount, quote.QuoteNumber)
+	return n.sendEmail(freelancerEmail, subject, html)
+}
+
 // SendChangeRequestNotification notifies the freelancer that the client requested changes.
 func (n *NotificationService) SendChangeRequestNotification(quote *models.Quote, clientName, requesterName, requestMessage, freelancerEmail string) error {
 	displayName := requesterName

@@ -114,6 +114,12 @@ func (db *DB) UpsertProfile(ctx context.Context, p *models.Profile) error {
 	if p.TeamID != nil {
 		row["team_id"] = *p.TeamID
 	}
+	if p.DefaultPaymentTiming != "" {
+		row["default_payment_timing"] = p.DefaultPaymentTiming
+	}
+	if p.PreferredUSDProcessor != nil {
+		row["preferred_usd_processor"] = *p.PreferredUSDProcessor
+	}
 	raw, _, err := db.client.From("profiles").
 		Upsert(row, "user_id", "representation", "").
 		Execute()
@@ -1567,6 +1573,282 @@ func (db *DB) RemoveTeamMember(ctx context.Context, teamID, userID string) error
 		Eq("user_id", userID).
 		Execute()
 	return err
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PAYMENTS
+// ─────────────────────────────────────────────────────────────────────────────
+
+func (db *DB) ListPaymentAccounts(ctx context.Context, userID string) ([]models.PaymentAccount, error) {
+	raw, _, err := db.client.From("payment_accounts").
+		Select("id,user_id,processor,wipay_account_id,stripe_account_id,paypal_merchant_id,is_active,created_at", "exact", false).
+		Eq("user_id", userID).
+		Eq("is_active", "true").
+		Execute()
+	if err != nil {
+		return nil, err
+	}
+	var accounts []models.PaymentAccount
+	return accounts, decode(raw, &accounts)
+}
+
+func (db *DB) GetPaymentAccount(ctx context.Context, userID, processor string) (*models.PaymentAccount, error) {
+	raw, _, err := db.client.From("payment_accounts").
+		Select("id,user_id,processor,wipay_account_id,stripe_account_id,paypal_merchant_id,is_active,created_at", "exact", false).
+		Eq("user_id", userID).
+		Eq("processor", processor).
+		Eq("is_active", "true").
+		Limit(1, "").
+		Execute()
+	if err != nil {
+		return nil, err
+	}
+	var rows []models.PaymentAccount
+	if err := decode(raw, &rows); err != nil {
+		return nil, err
+	}
+	if len(rows) == 0 {
+		return nil, fmt.Errorf("payment account not found")
+	}
+	return &rows[0], nil
+}
+
+func (db *DB) GetPaymentAccountFull(ctx context.Context, userID, processor string) (*models.PaymentAccountFull, error) {
+	raw, _, err := db.client.From("payment_accounts").
+		Select("*", "exact", false).
+		Eq("user_id", userID).
+		Eq("processor", processor).
+		Eq("is_active", "true").
+		Limit(1, "").
+		Execute()
+	if err != nil {
+		return nil, err
+	}
+	var rows []models.PaymentAccountFull
+	if err := decode(raw, &rows); err != nil {
+		return nil, err
+	}
+	if len(rows) == 0 {
+		return nil, fmt.Errorf("payment account not found")
+	}
+	return &rows[0], nil
+}
+
+func (db *DB) UpsertPaymentAccount(ctx context.Context, userID, processor string, fields map[string]string) error {
+	row := map[string]interface{}{
+		"user_id":     userID,
+		"processor":   processor,
+		"is_active":   true,
+		"updated_at":  time.Now(),
+	}
+	for k, v := range fields {
+		row[k] = v
+	}
+	_, _, err := db.client.From("payment_accounts").
+		Upsert(row, "user_id,processor", "representation", "").
+		Execute()
+	return err
+}
+
+func (db *DB) DisconnectPaymentAccount(ctx context.Context, userID, processor string) error {
+	_, _, err := db.client.From("payment_accounts").
+		Update(map[string]interface{}{"is_active": false, "updated_at": time.Now()}, "*", "").
+		Eq("user_id", userID).
+		Eq("processor", processor).
+		Execute()
+	return err
+}
+
+// GetBestPaymentAccountFull returns the best account for the given currency (with credentials).
+// JMD/TTD/BBD → WiPay; USD → Stripe or PayPal (from profile preference).
+// ListPaymentProcessorsForCurrency returns processors available for the given currency.
+// JMD/TTD/BBD → ["wipay"] if connected; USD → ["stripe","paypal"] for each connected.
+func (db *DB) ListPaymentProcessorsForCurrency(ctx context.Context, userID, currency string) []string {
+	accounts, err := db.ListPaymentAccounts(ctx, userID)
+	if err != nil || len(accounts) == 0 {
+		return nil
+	}
+	caribbean := map[string]bool{"JMD": true, "TTD": true, "BBD": true}
+	if caribbean[currency] {
+		for _, a := range accounts {
+			if a.Processor == models.ProcessorWiPay {
+				return []string{string(models.ProcessorWiPay)}
+			}
+		}
+		return nil
+	}
+	var out []string
+	for _, a := range accounts {
+		if (a.Processor == models.ProcessorStripe || a.Processor == models.ProcessorPayPal) && a.IsActive {
+			out = append(out, string(a.Processor))
+		}
+	}
+	return out
+}
+
+func (db *DB) GetBestPaymentAccountFull(ctx context.Context, userID, currency string) (*models.PaymentAccountFull, error) {
+	caribbean := map[string]bool{"JMD": true, "TTD": true, "BBD": true}
+	if caribbean[currency] {
+		return db.GetPaymentAccountFull(ctx, userID, "wipay")
+	}
+	profile, _ := db.GetProfile(ctx, userID)
+	pref := "stripe"
+	if profile != nil && profile.PreferredUSDProcessor != nil && *profile.PreferredUSDProcessor != "" {
+		pref = *profile.PreferredUSDProcessor
+	}
+	acc, _ := db.GetPaymentAccountFull(ctx, userID, pref)
+	if acc != nil {
+		return acc, nil
+	}
+	other := "paypal"
+	if pref == "paypal" {
+		other = "stripe"
+	}
+	return db.GetPaymentAccountFull(ctx, userID, other)
+}
+
+func (db *DB) CreatePayment(ctx context.Context, p *models.Payment) error {
+	row := map[string]interface{}{
+		"quote_id":             p.QuoteID,
+		"user_id":              p.UserID,
+		"processor":            p.Processor,
+		"payment_type":         p.PaymentType,
+		"amount":               p.Amount,
+		"platform_fee":         p.PlatformFee,
+		"net_amount":           p.NetAmount,
+		"currency":             p.Currency,
+		"status":               p.Status,
+		"processor_payment_id": p.ProcessorPaymentID,
+		"payment_url":          p.PaymentURL,
+	}
+	raw, _, err := db.client.From("payments").
+		Insert(row, false, "", "representation", "").
+		Execute()
+	if err != nil {
+		return err
+	}
+	var results []models.Payment
+	if err := decode(raw, &results); err != nil || len(results) == 0 {
+		return err
+	}
+	*p = results[0]
+	return nil
+}
+
+func (db *DB) GetPaymentByProcessorID(ctx context.Context, processorPaymentID, processor string) (*models.Payment, error) {
+	raw, _, err := db.client.From("payments").
+		Select("*", "exact", false).
+		Eq("processor_payment_id", processorPaymentID).
+		Eq("processor", processor).
+		Eq("status", "pending").
+		Limit(1, "").
+		Execute()
+	if err != nil {
+		return nil, err
+	}
+	var rows []models.Payment
+	if err := decode(raw, &rows); err != nil || len(rows) == 0 {
+		return nil, err
+	}
+	return &rows[0], nil
+}
+
+func (db *DB) GetPaymentByQuoteAndType(ctx context.Context, quoteID string, paymentType models.PaymentType) (*models.Payment, error) {
+	raw, _, err := db.client.From("payments").
+		Select("*", "exact", false).
+		Eq("quote_id", quoteID).
+		Eq("payment_type", string(paymentType)).
+		Eq("status", "pending").
+		Order("created_at", &postgrest.OrderOpts{Ascending: false}).
+		Limit(1, "").
+		Execute()
+	if err != nil {
+		return nil, err
+	}
+	var rows []models.Payment
+	if err := decode(raw, &rows); err != nil {
+		return nil, err
+	}
+	if len(rows) == 0 {
+		return nil, fmt.Errorf("payment not found")
+	}
+	return &rows[0], nil
+}
+
+func (db *DB) MarkPaymentPaid(ctx context.Context, paymentID string) error {
+	now := time.Now()
+	_, _, err := db.client.From("payments").
+		Update(map[string]interface{}{"status": "paid", "paid_at": now, "updated_at": now}, "*", "").
+		Eq("id", paymentID).
+		Execute()
+	return err
+}
+
+func (db *DB) GetDepositPaid(ctx context.Context, quoteID string) (float64, error) {
+	raw, _, err := db.client.From("payments").
+		Select("amount", "exact", false).
+		Eq("quote_id", quoteID).
+		Eq("payment_type", "deposit").
+		Eq("status", "paid").
+		Execute()
+	if err != nil {
+		return 0, err
+	}
+	var rows []struct{ Amount float64 `json:"amount"` }
+	if err := decode(raw, &rows); err != nil {
+		return 0, err
+	}
+	var total float64
+	for _, r := range rows {
+		total += r.Amount
+	}
+	return total, nil
+}
+
+func (db *DB) UpdateQuotePaymentStatus(ctx context.Context, quoteID string, paymentType models.PaymentType) error {
+	now := time.Now()
+	updates := map[string]interface{}{"updated_at": now}
+	switch paymentType {
+	case models.PaymentTypeFull:
+		updates["fully_paid_at"] = now
+		updates["paid_at"] = now
+	case models.PaymentTypeDeposit:
+		updates["deposit_paid_at"] = now
+	case models.PaymentTypeBalance:
+		updates["fully_paid_at"] = now
+		updates["paid_at"] = now
+	}
+	_, _, err := db.client.From("quotes").
+		Update(updates, "*", "").
+		Eq("id", quoteID).
+		Execute()
+	return err
+}
+
+func (db *DB) ListPayments(ctx context.Context, userID string) ([]models.Payment, error) {
+	raw, _, err := db.client.From("payments").
+		Select("*", "exact", false).
+		Eq("user_id", userID).
+		Order("created_at", &postgrest.OrderOpts{Ascending: false}).
+		Execute()
+	if err != nil {
+		return nil, err
+	}
+	var payments []models.Payment
+	return payments, decode(raw, &payments)
+}
+
+func (db *DB) GetQuoteByID(ctx context.Context, quoteID string) (*models.QuoteWithDetails, error) {
+	raw, _, err := db.client.From("quotes").
+		Select("*,client:clients(*),line_items(*)", "exact", false).
+		Eq("id", quoteID).
+		Single().
+		Execute()
+	if err != nil {
+		return nil, fmt.Errorf("get quote: %w", err)
+	}
+	var q models.QuoteWithDetails
+	return &q, decode(raw, &q)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -34,9 +34,10 @@ func main() {
 		log.Fatalf("database: %v", err)
 	}
 
-	notif := services.NewNotificationService(cfg)
-	auth  := services.NewAuthService(cfg)
-	h     := handlers.New(db, notif, auth, cfg)
+	notif    := services.NewNotificationService(cfg)
+	auth     := services.NewAuthService(cfg)
+	payments := services.NewPaymentService(cfg)
+	h        := handlers.New(db, notif, auth, payments, cfg)
 
 	jwtVerifier, err := middleware.NewJWTVerifier(cfg)
 	if err != nil {
@@ -78,11 +79,21 @@ func main() {
 	// Stripe webhook (no auth, verify Stripe signature)
 	r.With(apiLimiter.Limit).Post("/billing/webhook", h.StripeWebhook)
 
+	// Payment webhooks (no auth, verify by signature or form)
+	r.With(apiLimiter.Limit).Post("/webhooks/stripe-payment", h.StripePaymentWebhook)
+	r.With(apiLimiter.Limit).Post("/webhooks/paypal", h.PayPalWebhook)
+	r.With(apiLimiter.Limit).Post("/webhooks/wipay", h.WiPayWebhook)
+
+	// OAuth callbacks (public — Stripe/PayPal redirect here)
+	r.With(apiLimiter.Limit).Get("/payments/connect/stripe/callback", h.StripeConnectCallback)
+	r.With(apiLimiter.Limit).Get("/payments/connect/paypal/callback", h.PayPalConnectCallback)
+
 	// Public quote viewer — clients open these from WhatsApp/email links
 	r.Route("/q/{token}", func(r chi.Router) {
 		r.Use(publicLimiter.Limit)
 		r.Get("/",        h.PublicGetQuote)    // load quote data for viewer
 		r.Post("/accept", h.PublicAcceptQuote) // client accepts the quote
+		r.Post("/pay",    h.PublicCreatePaymentLink) // client creates payment link
 		r.Get("/notes",   h.PublicGetNotes)    // notes thread (public)
 		r.Post("/notes",  h.PublicPostNote)    // client posts note (public)
 	})
@@ -119,6 +130,17 @@ func main() {
 
 		// Billing (Stripe)
 		r.Post("/billing/create-checkout-session", h.CreateCheckoutSession)
+
+		// Payments (Stripe Connect, PayPal, WiPay)
+		r.Route("/payments", func(r chi.Router) {
+			r.Get("/accounts", h.ListPaymentAccounts)
+			r.Post("/connect/wipay", h.ConnectWiPay)
+			r.Post("/connect/stripe", h.ConnectStripe)
+			r.Post("/connect/paypal", h.ConnectPayPal)
+			r.Delete("/disconnect/{processor}", h.DisconnectProcessor)
+			r.Post("/create-link", h.CreatePaymentLink)
+			r.Get("/history", h.ListPayments)
+		})
 
 		// Templates
 		r.Get("/templates", h.ListTemplates)

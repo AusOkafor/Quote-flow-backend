@@ -8,7 +8,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -29,14 +31,15 @@ var validate = validator.New()
 
 // Handler holds all dependencies for the HTTP handlers.
 type Handler struct {
-	db    *repository.DB
-	notif *services.NotificationService
-	auth  *services.AuthService
-	cfg   *config.Config
+	db       *repository.DB
+	notif    *services.NotificationService
+	auth     *services.AuthService
+	payments *services.PaymentService
+	cfg      *config.Config
 }
 
-func New(db *repository.DB, notif *services.NotificationService, auth *services.AuthService, cfg *config.Config) *Handler {
-	return &Handler{db: db, notif: notif, auth: auth, cfg: cfg}
+func New(db *repository.DB, notif *services.NotificationService, auth *services.AuthService, payments *services.PaymentService, cfg *config.Config) *Handler {
+	return &Handler{db: db, notif: notif, auth: auth, payments: payments, cfg: cfg}
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -383,6 +386,380 @@ func (h *Handler) RemoveTeamMember(w http.ResponseWriter, r *http.Request) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// PAYMENTS
+// ─────────────────────────────────────────────────────────────────────────────
+
+// GET /payments/accounts
+func (h *Handler) ListPaymentAccounts(w http.ResponseWriter, r *http.Request) {
+	user := currentUser(r)
+	accounts, err := h.db.ListPaymentAccounts(r.Context(), user.ID)
+	if err != nil {
+		h.err(w, http.StatusInternalServerError, "failed to load payment accounts")
+		return
+	}
+	if accounts == nil {
+		accounts = []models.PaymentAccount{}
+	}
+	h.ok(w, accounts)
+}
+
+// POST /payments/connect/wipay
+func (h *Handler) ConnectWiPay(w http.ResponseWriter, r *http.Request) {
+	user := currentUser(r)
+	var req models.ConnectWiPayRequest
+	if err := h.decode(r, &req); err != nil {
+		h.err(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if err := h.validateRequest(&req); err != nil {
+		h.err(w, http.StatusBadRequest, validationErrorMsg(err))
+		return
+	}
+	if err := h.payments.ValidateWiPayCredentials(req.AccountID, req.APIKey); err != nil {
+		h.err(w, http.StatusBadRequest, "invalid WiPay credentials: "+err.Error())
+		return
+	}
+	if err := h.db.UpsertPaymentAccount(r.Context(), user.ID, "wipay", map[string]string{
+		"wipay_account_id": req.AccountID,
+		"wipay_api_key":    req.APIKey,
+	}); err != nil {
+		h.err(w, http.StatusInternalServerError, "failed to save WiPay account")
+		return
+	}
+	h.ok(w, map[string]string{"status": "connected"})
+}
+
+// POST /payments/connect/stripe
+func (h *Handler) ConnectStripe(w http.ResponseWriter, r *http.Request) {
+	user := currentUser(r)
+	oauthURL := fmt.Sprintf(
+		"https://connect.stripe.com/oauth/authorize?response_type=code&client_id=%s&scope=read_write&state=%s",
+		h.cfg.StripeClientID,
+		user.ID,
+	)
+	h.ok(w, map[string]string{"url": oauthURL})
+}
+
+// GET /payments/connect/stripe/callback
+func (h *Handler) StripeConnectCallback(w http.ResponseWriter, r *http.Request) {
+	code := r.URL.Query().Get("code")
+	state := r.URL.Query().Get("state")
+	if code == "" || state == "" {
+		http.Redirect(w, r, h.cfg.FrontendURL+"/app/settings?tab=payments&error=stripe", http.StatusFound)
+		return
+	}
+	resp, err := h.payments.ExchangeStripeCode(code)
+	if err != nil {
+		http.Redirect(w, r, h.cfg.FrontendURL+"/app/settings?tab=payments&error=stripe", http.StatusFound)
+		return
+	}
+	if err := h.db.UpsertPaymentAccount(r.Context(), state, "stripe", map[string]string{
+		"stripe_account_id":   resp.StripeUserID,
+		"stripe_access_token": resp.AccessToken,
+	}); err != nil {
+		http.Redirect(w, r, h.cfg.FrontendURL+"/app/settings?tab=payments&error=stripe", http.StatusFound)
+		return
+	}
+	http.Redirect(w, r, h.cfg.FrontendURL+"/app/settings?tab=payments&connected=stripe", http.StatusFound)
+}
+
+// POST /payments/connect/paypal
+func (h *Handler) ConnectPayPal(w http.ResponseWriter, r *http.Request) {
+	user := currentUser(r)
+	onboardingURL, err := h.payments.CreatePayPalOnboardingLink(user.ID)
+	if err != nil {
+		h.err(w, http.StatusInternalServerError, "failed to create PayPal onboarding link")
+		return
+	}
+	h.ok(w, map[string]string{"url": onboardingURL})
+}
+
+// GET /payments/connect/paypal/callback
+func (h *Handler) PayPalConnectCallback(w http.ResponseWriter, r *http.Request) {
+	paypalMerchantID := r.URL.Query().Get("merchantIdInPayPal")
+	trackingID := r.URL.Query().Get("merchantId")
+	if paypalMerchantID == "" || trackingID == "" {
+		http.Redirect(w, r, h.cfg.FrontendURL+"/app/settings?tab=payments&error=paypal", http.StatusFound)
+		return
+	}
+	if err := h.db.UpsertPaymentAccount(r.Context(), trackingID, "paypal", map[string]string{
+		"paypal_merchant_id": paypalMerchantID,
+	}); err != nil {
+		http.Redirect(w, r, h.cfg.FrontendURL+"/app/settings?tab=payments&error=paypal", http.StatusFound)
+		return
+	}
+	http.Redirect(w, r, h.cfg.FrontendURL+"/app/settings?tab=payments&connected=paypal", http.StatusFound)
+}
+
+// DELETE /payments/disconnect/:processor
+func (h *Handler) DisconnectProcessor(w http.ResponseWriter, r *http.Request) {
+	user := currentUser(r)
+	processor := chi.URLParam(r, "processor")
+	if processor != "wipay" && processor != "stripe" && processor != "paypal" {
+		h.err(w, http.StatusBadRequest, "invalid processor")
+		return
+	}
+	if err := h.db.DisconnectPaymentAccount(r.Context(), user.ID, processor); err != nil {
+		h.err(w, http.StatusInternalServerError, "failed to disconnect")
+		return
+	}
+	h.ok(w, map[string]bool{"disconnected": true})
+}
+
+func calcDeposit(quote *models.QuoteWithDetails) float64 {
+	raw := strings.TrimSuffix(strings.TrimSpace(quote.Deposit), "%")
+	pct, err := strconv.ParseFloat(raw, 64)
+	if err != nil || pct <= 0 || pct > 100 {
+		return math.Round(quote.Total*0.5*100) / 100
+	}
+	return math.Round(quote.Total*(pct/100)*100) / 100
+}
+
+// POST /payments/create-link
+func (h *Handler) CreatePaymentLink(w http.ResponseWriter, r *http.Request) {
+	user := currentUser(r)
+	var req models.CreatePaymentLinkRequest
+	if err := h.decode(r, &req); err != nil {
+		h.err(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if err := h.validateRequest(&req); err != nil {
+		h.err(w, http.StatusBadRequest, validationErrorMsg(err))
+		return
+	}
+
+	quote, err := h.db.GetQuote(r.Context(), req.QuoteID, user.ID)
+	if err != nil || quote == nil {
+		h.err(w, http.StatusNotFound, "quote not found")
+		return
+	}
+
+	var amount float64
+	switch req.PaymentType {
+	case models.PaymentTypeFull:
+		amount = quote.Total
+	case models.PaymentTypeDeposit:
+		amount = calcDeposit(quote)
+	case models.PaymentTypeBalance:
+		depositPaid, _ := h.db.GetDepositPaid(r.Context(), quote.ID)
+		amount = math.Round((quote.Total-depositPaid)*100) / 100
+		if amount <= 0 {
+			h.err(w, http.StatusBadRequest, "balance already paid")
+			return
+		}
+	}
+
+	platformFee := math.Round(amount*h.cfg.PlatformFeePercent*100) / 100
+	netAmount := amount - platformFee
+
+	account, err := h.db.GetBestPaymentAccountFull(r.Context(), user.ID, quote.Currency)
+	if err != nil || account == nil {
+		h.err(w, http.StatusBadRequest, "no payment processor connected for "+quote.Currency+" quotes. Connect WiPay, Stripe, or PayPal in Settings.")
+		return
+	}
+
+	var paymentURL, processorPaymentID string
+
+	switch account.Processor {
+	case models.ProcessorStripe:
+		link, err := h.payments.CreateStripePaymentLink(account, quote, amount, platformFee, req.PaymentType)
+		if err != nil {
+			h.err(w, http.StatusInternalServerError, "Stripe error: "+err.Error())
+			return
+		}
+		paymentURL, processorPaymentID = link.URL, link.ID
+	case models.ProcessorPayPal:
+		link, err := h.payments.CreatePayPalOrder(account, quote, amount, platformFee, req.PaymentType)
+		if err != nil {
+			h.err(w, http.StatusInternalServerError, "PayPal error: "+err.Error())
+			return
+		}
+		paymentURL, processorPaymentID = link.ApproveURL, link.OrderID
+	case models.ProcessorWiPay:
+		link, err := h.payments.CreateWiPayLink(account, quote, amount, req.PaymentType)
+		if err != nil {
+			h.err(w, http.StatusInternalServerError, "WiPay error: "+err.Error())
+			return
+		}
+		paymentURL, processorPaymentID = link.URL, link.TransactionID
+	default:
+		h.err(w, http.StatusBadRequest, "unsupported processor")
+		return
+	}
+
+	payment := &models.Payment{
+		QuoteID:            quote.ID,
+		UserID:             user.ID,
+		Processor:          account.Processor,
+		PaymentType:        req.PaymentType,
+		Amount:             amount,
+		PlatformFee:        platformFee,
+		NetAmount:          netAmount,
+		Currency:           quote.Currency,
+		Status:             models.PaymentStatusPending,
+		ProcessorPaymentID: processorPaymentID,
+		PaymentURL:         paymentURL,
+	}
+	if err := h.db.CreatePayment(r.Context(), payment); err != nil {
+		h.err(w, http.StatusInternalServerError, "failed to create payment record")
+		return
+	}
+
+	h.ok(w, models.PaymentLinkResponse{
+		PaymentURL:  paymentURL,
+		Amount:      amount,
+		PlatformFee: platformFee,
+		NetAmount:   netAmount,
+		Currency:    quote.Currency,
+		PaymentType: req.PaymentType,
+		Processor:   account.Processor,
+	})
+}
+
+// GET /payments/history
+func (h *Handler) ListPayments(w http.ResponseWriter, r *http.Request) {
+	user := currentUser(r)
+	payments, err := h.db.ListPayments(r.Context(), user.ID)
+	if err != nil {
+		h.err(w, http.StatusInternalServerError, "failed to load payments")
+		return
+	}
+	if payments == nil {
+		payments = []models.Payment{}
+	}
+	h.ok(w, payments)
+}
+
+// POST /q/:token/pay — public, client creates payment link
+func (h *Handler) PublicCreatePaymentLink(w http.ResponseWriter, r *http.Request) {
+	token := chi.URLParam(r, "token")
+	quote, err := h.db.GetQuoteByShareToken(r.Context(), token)
+	if err != nil || quote == nil {
+		h.err(w, http.StatusNotFound, "quote not found")
+		return
+	}
+	if quote.Status != models.StatusAccepted {
+		h.err(w, http.StatusBadRequest, "quote must be accepted before payment")
+		return
+	}
+
+	var req struct {
+		PaymentType models.PaymentType `json:"payment_type"`
+		Processor   string            `json:"processor"` // optional: wipay, stripe, paypal — client picks when multiple available
+	}
+	if err := h.decode(r, &req); err != nil || req.PaymentType == "" {
+		h.err(w, http.StatusBadRequest, "payment_type required")
+		return
+	}
+	if req.PaymentType != models.PaymentTypeFull && req.PaymentType != models.PaymentTypeDeposit && req.PaymentType != models.PaymentTypeBalance {
+		h.err(w, http.StatusBadRequest, "payment_type must be full, deposit, or balance")
+		return
+	}
+
+	userID := quote.UserID
+
+	var account *models.PaymentAccountFull
+	if req.Processor != "" {
+		proc := models.PaymentProcessor(req.Processor)
+		if proc != models.ProcessorWiPay && proc != models.ProcessorStripe && proc != models.ProcessorPayPal {
+			h.err(w, http.StatusBadRequest, "invalid processor")
+			return
+		}
+		account, err = h.db.GetPaymentAccountFull(r.Context(), userID, req.Processor)
+		if err != nil || account == nil {
+			h.err(w, http.StatusBadRequest, "processor not connected")
+			return
+		}
+		// Currency check: PayPal only for USD
+		if proc == models.ProcessorPayPal && quote.Currency != "USD" {
+			h.err(w, http.StatusBadRequest, "PayPal only supports USD")
+			return
+		}
+	} else {
+		account, err = h.db.GetBestPaymentAccountFull(r.Context(), userID, quote.Currency)
+		if err != nil || account == nil {
+			h.err(w, http.StatusBadRequest, "no payment processor connected. Ask the freelancer to connect a processor in Settings.")
+			return
+		}
+	}
+
+	var amount float64
+	switch req.PaymentType {
+	case models.PaymentTypeFull:
+		amount = quote.Total
+	case models.PaymentTypeDeposit:
+		amount = calcDeposit(quote)
+	case models.PaymentTypeBalance:
+		depositPaid, _ := h.db.GetDepositPaid(r.Context(), quote.ID)
+		amount = math.Round((quote.Total-depositPaid)*100) / 100
+		if amount <= 0 {
+			h.err(w, http.StatusBadRequest, "balance already paid")
+			return
+		}
+	}
+
+	platformFee := math.Round(amount*h.cfg.PlatformFeePercent*100) / 100
+	netAmount := amount - platformFee
+
+	var paymentURL, processorPaymentID string
+
+	switch account.Processor {
+	case models.ProcessorStripe:
+		link, err := h.payments.CreateStripePaymentLink(account, quote, amount, platformFee, req.PaymentType)
+		if err != nil {
+			h.err(w, http.StatusInternalServerError, "payment link failed")
+			return
+		}
+		paymentURL, processorPaymentID = link.URL, link.ID
+	case models.ProcessorPayPal:
+		link, err := h.payments.CreatePayPalOrder(account, quote, amount, platformFee, req.PaymentType)
+		if err != nil {
+			h.err(w, http.StatusInternalServerError, "payment link failed")
+			return
+		}
+		paymentURL, processorPaymentID = link.ApproveURL, link.OrderID
+	case models.ProcessorWiPay:
+		link, err := h.payments.CreateWiPayLink(account, quote, amount, req.PaymentType)
+		if err != nil {
+			h.err(w, http.StatusInternalServerError, "payment link failed")
+			return
+		}
+		paymentURL, processorPaymentID = link.URL, link.TransactionID
+	default:
+		h.err(w, http.StatusBadRequest, "unsupported processor")
+		return
+	}
+
+	payment := &models.Payment{
+		QuoteID:            quote.ID,
+		UserID:             userID,
+		Processor:          account.Processor,
+		PaymentType:        req.PaymentType,
+		Amount:             amount,
+		PlatformFee:        platformFee,
+		NetAmount:          netAmount,
+		Currency:           quote.Currency,
+		Status:             models.PaymentStatusPending,
+		ProcessorPaymentID: processorPaymentID,
+		PaymentURL:         paymentURL,
+	}
+	if err := h.db.CreatePayment(r.Context(), payment); err != nil {
+		h.err(w, http.StatusInternalServerError, "failed to create payment record")
+		return
+	}
+
+	h.ok(w, models.PaymentLinkResponse{
+		PaymentURL:  paymentURL,
+		Amount:      amount,
+		PlatformFee: platformFee,
+		NetAmount:   netAmount,
+		Currency:    quote.Currency,
+		PaymentType: req.PaymentType,
+		Processor:   account.Processor,
+	})
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // API KEYS (Business plan)
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -563,7 +940,112 @@ func (h *Handler) CreateCheckoutSession(w http.ResponseWriter, r *http.Request) 
 		}
 		return
 	}
-	h.ok(w, map[string]string{"url": sess.URL})
+		h.ok(w, map[string]string{"url": sess.URL})
+}
+
+// POST /webhooks/stripe-payment — Stripe Connect payment webhook (checkout.session.completed)
+func (h *Handler) StripePaymentWebhook(w http.ResponseWriter, r *http.Request) {
+	if h.cfg.StripePaymentWebhookSecret == "" {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	event, err := webhook.ConstructEvent(body, r.Header.Get("Stripe-Signature"), h.cfg.StripePaymentWebhookSecret)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	if event.Type == "checkout.session.completed" {
+		var sess stripe.CheckoutSession
+		if err := json.Unmarshal(event.Data.Raw, &sess); err != nil {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		quoteID := sess.Metadata["quote_id"]
+		paymentType := models.PaymentType(sess.Metadata["payment_type"])
+		if quoteID != "" && (paymentType == models.PaymentTypeFull || paymentType == models.PaymentTypeDeposit || paymentType == models.PaymentTypeBalance) {
+			h.handlePaymentConfirmed(r.Context(), quoteID, paymentType)
+		}
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+// POST /webhooks/paypal — PayPal payment webhook
+func (h *Handler) PayPalWebhook(w http.ResponseWriter, r *http.Request) {
+	var event struct {
+		EventType string          `json:"event_type"`
+		Resource  json.RawMessage `json:"resource"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&event); err != nil {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if event.EventType == "PAYMENT.CAPTURE.COMPLETED" {
+		var capture struct {
+			SupplementaryData struct {
+				RelatedIDs struct {
+					OrderID string `json:"order_id"`
+				} `json:"related_ids"`
+			} `json:"supplementary_data"`
+		}
+		if err := json.Unmarshal(event.Resource, &capture); err != nil {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		orderID := capture.SupplementaryData.RelatedIDs.OrderID
+		payment, err := h.db.GetPaymentByProcessorID(r.Context(), orderID, "paypal")
+		if err != nil || payment == nil {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		h.handlePaymentConfirmed(r.Context(), payment.QuoteID, payment.PaymentType)
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+// POST /webhooks/wipay — WiPay payment webhook
+func (h *Handler) WiPayWebhook(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	transactionID := r.FormValue("transaction_id")
+	status := r.FormValue("status")
+	if status == "success" && transactionID != "" {
+		payment, err := h.db.GetPaymentByProcessorID(r.Context(), transactionID, "wipay")
+		if err != nil || payment == nil {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		h.handlePaymentConfirmed(r.Context(), payment.QuoteID, payment.PaymentType)
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+// handlePaymentConfirmed is called by payment webhooks when payment succeeds.
+func (h *Handler) handlePaymentConfirmed(ctx context.Context, quoteID string, paymentType models.PaymentType) {
+	payment, err := h.db.GetPaymentByQuoteAndType(ctx, quoteID, paymentType)
+	if err != nil || payment == nil {
+		return
+	}
+	_ = h.db.MarkPaymentPaid(ctx, payment.ID)
+	_ = h.db.UpdateQuotePaymentStatus(ctx, payment.QuoteID, payment.PaymentType)
+	_ = h.db.LogEvent(ctx, payment.UserID, payment.QuoteID, "paid",
+		fmt.Sprintf("Payment received via %s", payment.Processor))
+
+	go func() {
+		bgCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		quote, _ := h.db.GetQuoteByID(bgCtx, payment.QuoteID)
+		profile, _ := h.db.GetProfile(bgCtx, payment.UserID)
+		if quote != nil && profile != nil {
+			_ = h.notif.SendPaymentReceivedNotification(quote, payment, profile.EmailOnQuote)
+		}
+	}()
 }
 
 // POST /billing/webhook — Stripe webhook (no auth, verify signature)
@@ -1184,22 +1666,30 @@ func (h *Handler) PublicGetQuote(w http.ResponseWriter, r *http.Request) {
 
 	// Include creator profile (logo, business name) for display on public quote
 	profile, _ := h.db.GetProfile(r.Context(), quote.UserID)
+	paymentProcessors := h.db.ListPaymentProcessorsForCurrency(r.Context(), quote.UserID, quote.Currency)
+	defaultPaymentTiming := "link_only"
+	if profile != nil && profile.DefaultPaymentTiming != "" {
+		defaultPaymentTiming = profile.DefaultPaymentTiming
+	}
 	type creatorInfo struct {
-		LogoURL      *string `json:"logo_url,omitempty"`
-		BusinessName string  `json:"business_name,omitempty"`
-		BrandColor   string  `json:"brand_color,omitempty"`
-		WhiteLabel   bool    `json:"white_label,omitempty"` // Business plan: no QuoteFlow fallback
+		LogoURL             *string  `json:"logo_url,omitempty"`
+		BusinessName        string   `json:"business_name,omitempty"`
+		BrandColor         string   `json:"brand_color,omitempty"`
+		WhiteLabel         bool     `json:"white_label,omitempty"`
+		DefaultPaymentTiming string `json:"default_payment_timing,omitempty"`
 	}
 	out := struct {
 		models.QuoteWithDetails
-		Creator *creatorInfo `json:"creator,omitempty"`
-	}{QuoteWithDetails: *quote}
+		Creator           *creatorInfo `json:"creator,omitempty"`
+		PaymentProcessors []string    `json:"payment_processors,omitempty"`
+	}{QuoteWithDetails: *quote, PaymentProcessors: paymentProcessors}
 	if profile != nil {
 		out.Creator = &creatorInfo{
-			LogoURL:      profile.LogoURL,
-			BusinessName: profile.BusinessName,
-			BrandColor:   profile.BrandColor,
-			WhiteLabel:   profile.Plan == "business",
+			LogoURL:              profile.LogoURL,
+			BusinessName:         profile.BusinessName,
+			BrandColor:           profile.BrandColor,
+			WhiteLabel:           profile.Plan == "business",
+			DefaultPaymentTiming: defaultPaymentTiming,
 		}
 	}
 	h.ok(w, &out)

@@ -46,6 +46,9 @@ type Profile struct {
 	Plan             string  `json:"plan" db:"plan"` // "free", "pro", or "business"
 	StripeCustomerID string  `json:"stripe_customer_id,omitempty" db:"stripe_customer_id"`
 	TeamID           *string `json:"team_id,omitempty" db:"team_id"`
+	// Payment preferences
+	DefaultPaymentTiming  string  `json:"default_payment_timing" db:"default_payment_timing"`   // full, deposit, link_only
+	PreferredUSDProcessor *string `json:"preferred_usd_processor,omitempty" db:"preferred_usd_processor"` // stripe, paypal
 	// Notification preferences
 	NotifyAccepted  bool `json:"notify_accepted" db:"notify_accepted"`
 	NotifyViewed    bool `json:"notify_viewed" db:"notify_viewed"`
@@ -155,6 +158,8 @@ type Quote struct {
 	AcceptedAt      *time.Time `json:"accepted_at" db:"accepted_at"`
 	AcceptedByName  string     `json:"accepted_by_name,omitempty" db:"accepted_by_name"`
 	PaidAt          *time.Time `json:"paid_at,omitempty" db:"paid_at"`
+	DepositPaidAt   *time.Time `json:"deposit_paid_at,omitempty" db:"deposit_paid_at"`
+	FullyPaidAt    *time.Time `json:"fully_paid_at,omitempty" db:"fully_paid_at"`
 	SentAt          *time.Time `json:"sent_at" db:"sent_at"`
 	// Share
 	ShareToken string   `json:"share_token" db:"share_token"` // unique token for public link
@@ -408,6 +413,96 @@ type CreateAPIKeyResponse struct {
 	Name      string    `json:"name"`
 	Key       string    `json:"key"` // qf_live_xxx — only shown once
 	CreatedAt time.Time `json:"created_at"`
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PAYMENTS
+// ─────────────────────────────────────────────────────────────────────────────
+
+type PaymentProcessor string
+
+const (
+	ProcessorWiPay  PaymentProcessor = "wipay"
+	ProcessorStripe PaymentProcessor = "stripe"
+	ProcessorPayPal PaymentProcessor = "paypal"
+)
+
+type PaymentType string
+
+const (
+	PaymentTypeFull    PaymentType = "full"
+	PaymentTypeDeposit PaymentType = "deposit"
+	PaymentTypeBalance PaymentType = "balance"
+)
+
+type PaymentStatus string
+
+const (
+	PaymentStatusPending  PaymentStatus = "pending"
+	PaymentStatusPaid     PaymentStatus = "paid"
+	PaymentStatusFailed   PaymentStatus = "failed"
+	PaymentStatusRefunded PaymentStatus = "refunded"
+)
+
+type PaymentAccount struct {
+	ID               string           `json:"id" db:"id"`
+	UserID           string           `json:"user_id" db:"user_id"`
+	Processor        PaymentProcessor `json:"processor" db:"processor"`
+	WiPayAccountID   string           `json:"wipay_account_id,omitempty" db:"wipay_account_id"`
+	StripeAccountID  string           `json:"stripe_account_id,omitempty" db:"stripe_account_id"`
+	PayPalMerchantID string           `json:"paypal_merchant_id,omitempty" db:"paypal_merchant_id"`
+	IsActive         bool             `json:"is_active" db:"is_active"`
+	CreatedAt        time.Time        `json:"created_at" db:"created_at"`
+}
+
+// PaymentAccountFull includes credentials (for internal payment service use only).
+type PaymentAccountFull struct {
+	PaymentAccount
+	WiPayAPIKey       string `json:"wipay_api_key" db:"wipay_api_key"`
+	StripeAccessToken string `json:"stripe_access_token" db:"stripe_access_token"`
+	PayPalAccessToken string `json:"paypal_access_token" db:"paypal_access_token"`
+}
+
+type Payment struct {
+	ID                 string           `json:"id" db:"id"`
+	QuoteID            string           `json:"quote_id" db:"quote_id"`
+	UserID             string           `json:"user_id" db:"user_id"`
+	Processor          PaymentProcessor `json:"processor" db:"processor"`
+	PaymentType        PaymentType      `json:"payment_type" db:"payment_type"`
+	Amount             float64          `json:"amount" db:"amount"`
+	PlatformFee        float64          `json:"platform_fee" db:"platform_fee"`
+	NetAmount          float64          `json:"net_amount" db:"net_amount"`
+	Currency           string           `json:"currency" db:"currency"`
+	Status             PaymentStatus    `json:"status" db:"status"`
+	ProcessorPaymentID string           `json:"processor_payment_id,omitempty" db:"processor_payment_id"`
+	PaymentURL         string           `json:"payment_url,omitempty" db:"payment_url"`
+	PaidAt             *time.Time       `json:"paid_at,omitempty" db:"paid_at"`
+	CreatedAt          time.Time        `json:"created_at" db:"created_at"`
+}
+
+type CreatePaymentLinkRequest struct {
+	QuoteID     string      `json:"quote_id" validate:"required,uuid"`
+	PaymentType PaymentType `json:"payment_type" validate:"required,oneof=full deposit balance"`
+}
+
+type PaymentLinkResponse struct {
+	PaymentURL  string           `json:"payment_url"`
+	Amount      float64          `json:"amount"`
+	PlatformFee float64          `json:"platform_fee"`
+	NetAmount   float64          `json:"net_amount"`
+	Currency    string           `json:"currency"`
+	PaymentType PaymentType      `json:"payment_type"`
+	Processor   PaymentProcessor `json:"processor"`
+}
+
+type ConnectWiPayRequest struct {
+	AccountID string `json:"account_id" validate:"required"`
+	APIKey    string `json:"api_key" validate:"required"`
+}
+
+type ConnectPayPalRequest struct {
+	MerchantID  string `json:"merchant_id" validate:"required"`
+	AccessToken string `json:"access_token" validate:"required"`
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
