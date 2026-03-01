@@ -481,29 +481,26 @@ func (db *DB) UpdateQuote(ctx context.Context, id, userID string, req *models.Up
 		return nil, fmt.Errorf("update quote: %w", err)
 	}
 
-	// If line items provided, delete old ones and insert new
+	// If line items provided, delete old ones and insert new (use maps like CreateQuote)
 	if len(req.LineItems) > 0 {
 		_, _, _ = db.client.From("line_items").
 			Delete("*", "").
 			Eq("quote_id", id).
 			Execute()
 
-		type lineItemRow struct {
-			QuoteID     string  `json:"quote_id"`
-			Position    int     `json:"position"`
-			Description string  `json:"description"`
-			Quantity    float64 `json:"quantity"`
-			UnitPrice   float64 `json:"unit_price"`
-		}
-		liRows := make([]lineItemRow, len(req.LineItems))
+		liRows := make([]map[string]interface{}, 0, len(req.LineItems))
 		for i, item := range req.LineItems {
-			liRows[i] = lineItemRow{
-				QuoteID:     id,
-				Position:    i,
-				Description: item.Description,
-				Quantity:    item.Quantity,
-				UnitPrice:   item.UnitPrice,
+			desc := strings.TrimSpace(item.Description)
+			if desc == "" {
+				desc = "Line item"
 			}
+			liRows = append(liRows, map[string]interface{}{
+				"quote_id":    id,
+				"position":    i,
+				"description": desc,
+				"quantity":    item.Quantity,
+				"unit_price":  item.UnitPrice,
+			})
 		}
 		_, _, err = db.client.From("line_items").
 			Insert(liRows, false, "", "representation", "").
