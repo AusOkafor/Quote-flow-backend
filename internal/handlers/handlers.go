@@ -330,6 +330,37 @@ func (h *Handler) AddTeamMember(w http.ResponseWriter, r *http.Request) {
 	h.ok(w, members)
 }
 
+// GET /teams/invited — teams where user is member/admin (not owner)
+func (h *Handler) GetTeamsInvited(w http.ResponseWriter, r *http.Request) {
+	user := currentUser(r)
+	teams, err := h.db.ListTeamsInvitedTo(r.Context(), user.ID)
+	if err != nil {
+		h.err(w, http.StatusInternalServerError, "failed to load invited teams")
+		return
+	}
+	if teams == nil {
+		teams = []models.Team{}
+	}
+	h.ok(w, teams)
+}
+
+// POST /teams/:id/sync — switch profile to this team (user must be member)
+func (h *Handler) SyncTeam(w http.ResponseWriter, r *http.Request) {
+	user := currentUser(r)
+	id := chi.URLParam(r, "id")
+	ok, _ := h.db.IsTeamMember(r.Context(), id, user.ID)
+	if !ok {
+		h.err(w, http.StatusForbidden, "not a team member")
+		return
+	}
+	if err := h.db.SyncTeam(r.Context(), id, user.ID); err != nil {
+		h.err(w, http.StatusInternalServerError, "failed to sync")
+		return
+	}
+	team, _ := h.db.GetTeam(r.Context(), id)
+	h.ok(w, team)
+}
+
 // DELETE /teams/:id/members/:userId
 func (h *Handler) RemoveTeamMember(w http.ResponseWriter, r *http.Request) {
 	user := currentUser(r)

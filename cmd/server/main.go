@@ -106,6 +106,8 @@ func main() {
 
 		// Teams (Business plan)
 		r.Get("/teams", h.GetMyTeam)
+		r.Get("/teams/invited", h.GetTeamsInvited)
+		r.Post("/teams/{id}/sync", h.SyncTeam)
 		r.Get("/teams/{id}/members", h.ListTeamMembers)
 		r.Post("/teams/{id}/members", h.AddTeamMember)
 		r.Delete("/teams/{id}/members/{userId}", h.RemoveTeamMember)

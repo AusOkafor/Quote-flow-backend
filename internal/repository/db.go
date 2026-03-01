@@ -1404,6 +1404,47 @@ func (db *DB) IsTeamMember(ctx context.Context, teamID, userID string) (bool, er
 	return len(rows) > 0, nil
 }
 
+// ListTeamsInvitedTo returns teams where the user is member or admin (not owner).
+func (db *DB) ListTeamsInvitedTo(ctx context.Context, userID string) ([]models.Team, error) {
+	raw, _, err := db.client.From("team_members").
+		Select("team_id", "exact", false).
+		Eq("user_id", userID).
+		Neq("role", "owner").
+		Execute()
+	if err != nil {
+		return nil, err
+	}
+	var rows []struct{ TeamID string `json:"team_id"` }
+	if err := decode(raw, &rows); err != nil {
+		return nil, err
+	}
+	if len(rows) == 0 {
+		return nil, nil
+	}
+	teamIDs := make([]string, len(rows))
+	for i, r := range rows {
+		teamIDs[i] = r.TeamID
+	}
+	raw2, _, err := db.client.From("teams").
+		Select("*", "exact", false).
+		In("id", teamIDs).
+		Execute()
+	if err != nil {
+		return nil, err
+	}
+	var teams []models.Team
+	return teams, decode(raw2, &teams)
+}
+
+// SyncTeam switches the user's profile to the given team (they must be a member).
+func (db *DB) SyncTeam(ctx context.Context, teamID, userID string) error {
+	_, _, err := db.client.From("profiles").
+		Update(map[string]interface{}{"team_id": teamID, "updated_at": time.Now()}, "*", "").
+		Eq("user_id", userID).
+		Execute()
+	return err
+}
+
 func (db *DB) AddTeamMember(ctx context.Context, teamID, userID, role string) error {
 	row := map[string]interface{}{
 		"team_id": teamID,
@@ -1412,14 +1453,6 @@ func (db *DB) AddTeamMember(ctx context.Context, teamID, userID, role string) er
 	}
 	_, _, err := db.client.From("team_members").
 		Insert(row, false, "", "representation", "").
-		Execute()
-	if err != nil {
-		return err
-	}
-	// Switch invitee's profile to this team so they immediately see team data
-	_, _, err = db.client.From("profiles").
-		Update(map[string]interface{}{"team_id": teamID, "updated_at": time.Now()}, "*", "").
-		Eq("user_id", userID).
 		Execute()
 	return err
 }
