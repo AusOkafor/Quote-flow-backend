@@ -1413,13 +1413,54 @@ func (db *DB) AddTeamMember(ctx context.Context, teamID, userID, role string) er
 	_, _, err := db.client.From("team_members").
 		Insert(row, false, "", "representation", "").
 		Execute()
+	if err != nil {
+		return err
+	}
+	// Switch invitee's profile to this team so they immediately see team data
+	_, _, err = db.client.From("profiles").
+		Update(map[string]interface{}{"team_id": teamID, "updated_at": time.Now()}, "*", "").
+		Eq("user_id", userID).
+		Execute()
 	return err
+}
+
+// getPersonalTeamID returns the team where the user is owner (their personal team).
+func (db *DB) getPersonalTeamID(ctx context.Context, userID string) (string, error) {
+	raw, _, err := db.client.From("team_members").
+		Select("team_id", "exact", false).
+		Eq("user_id", userID).
+		Eq("role", "owner").
+		Limit(1, "").
+		Execute()
+	if err != nil {
+		return "", err
+	}
+	var rows []struct{ TeamID string `json:"team_id"` }
+	if err := decode(raw, &rows); err != nil || len(rows) == 0 {
+		return "", err
+	}
+	return rows[0].TeamID, nil
 }
 
 func (db *DB) RemoveTeamMember(ctx context.Context, teamID, userID string) error {
 	_, _, err := db.client.From("team_members").
 		Delete("*", "").
 		Eq("team_id", teamID).
+		Eq("user_id", userID).
+		Execute()
+	if err != nil {
+		return err
+	}
+	// Switch removed user's profile back to their personal team
+	personalTeamID, _ := db.getPersonalTeamID(ctx, userID)
+	updateRow := map[string]interface{}{"updated_at": time.Now()}
+	if personalTeamID != "" {
+		updateRow["team_id"] = personalTeamID
+	} else {
+		updateRow["team_id"] = nil
+	}
+	_, _, err = db.client.From("profiles").
+		Update(updateRow, "*", "").
 		Eq("user_id", userID).
 		Execute()
 	return err

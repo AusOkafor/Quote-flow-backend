@@ -307,7 +307,7 @@ func (h *Handler) AddTeamMember(w http.ResponseWriter, r *http.Request) {
 	}
 	inviteeID, err := h.auth.GetUserIDByEmail(strings.TrimSpace(req.Email))
 	if err != nil || inviteeID == "" {
-		h.err(w, http.StatusNotFound, "user not found with that email")
+		h.err(w, http.StatusNotFound, "user not found — they must sign up for QuoteFlow first, then you can add them by email")
 		return
 	}
 	if inviteeID == user.ID {
