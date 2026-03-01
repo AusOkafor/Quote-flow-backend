@@ -509,7 +509,12 @@ func (h *Handler) CreateCheckoutSession(w http.ResponseWriter, r *http.Request) 
 	}
 	sess, err := session.New(sessParams)
 	if err != nil {
-		h.err(w, http.StatusInternalServerError, "failed to create checkout session")
+		errMsg := err.Error()
+		if h.cfg.IsDevelopment() {
+			h.err(w, http.StatusInternalServerError, "failed to create checkout session: "+errMsg)
+		} else {
+			h.err(w, http.StatusInternalServerError, "failed to create checkout session")
+		}
 		return
 	}
 	h.ok(w, map[string]string{"url": sess.URL})
