@@ -46,6 +46,14 @@ type Config struct {
 
 	// Cron: secret for internal cron endpoints (e.g. reminders)
 	CronSecret string
+
+	// Stripe
+	StripeSecretKey           string
+	StripeWebhookSecret       string
+	StripePriceProMonthly     string
+	StripePriceProAnnual      string
+	StripePriceBusinessMonthly string
+	StripePriceBusinessAnnual  string
 }
 
 // Load reads .env file (if present) and populates Config from environment variables.
@@ -72,6 +80,12 @@ func Load() (*Config, error) {
 		QuoteLinkBaseURL:        getEnv("QUOTE_LINK_BASE_URL", "https://quote-flow-phi.vercel.app/q"),
 		DevBypassUserID:         getEnv("DEV_BYPASS_USER_ID", "4946c101-f0e4-4c6d-a094-012a6ff7775a"),
 		CronSecret:              getEnv("CRON_SECRET", ""),
+		StripeSecretKey:         getEnv("STRIPE_SECRET_KEY", ""),
+		StripeWebhookSecret:     getEnv("STRIPE_WEBHOOK_SECRET", ""),
+		StripePriceProMonthly:   getEnv("STRIPE_PRICE_PRO_MONTHLY", ""),
+		StripePriceProAnnual:    getEnv("STRIPE_PRICE_PRO_ANNUAL", ""),
+		StripePriceBusinessMonthly:  getEnv("STRIPE_PRICE_BUSINESS_MONTHLY", ""),
+		StripePriceBusinessAnnual:   getEnv("STRIPE_PRICE_BUSINESS_ANNUAL", ""),
 	}
 
 	// Parse comma-separated allowed origins

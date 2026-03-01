@@ -130,6 +130,39 @@ func (db *DB) UpsertProfile(ctx context.Context, p *models.Profile) error {
 	return nil
 }
 
+// UpdateProfilePlan updates plan and stripe_customer_id for a user (used by Stripe webhooks).
+func (db *DB) UpdateProfilePlan(ctx context.Context, userID, plan, stripeCustomerID string) error {
+	row := map[string]interface{}{
+		"plan":                 plan,
+		"updated_at":           time.Now(),
+	}
+	if stripeCustomerID != "" {
+		row["stripe_customer_id"] = stripeCustomerID
+	}
+	_, _, err := db.client.From("profiles").
+		Update(row, "*", "").
+		Eq("user_id", userID).
+		Execute()
+	return err
+}
+
+// GetProfileByStripeCustomerID returns the profile for a Stripe customer ID.
+func (db *DB) GetProfileByStripeCustomerID(ctx context.Context, stripeCustomerID string) (*models.Profile, error) {
+	raw, _, err := db.client.From("profiles").
+		Select("*", "exact", false).
+		Eq("stripe_customer_id", stripeCustomerID).
+		Single().
+		Execute()
+	if err != nil {
+		return nil, err
+	}
+	var p models.Profile
+	if err := decode(raw, &p); err != nil {
+		return nil, err
+	}
+	return &p, nil
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // CLIENTS
 // ─────────────────────────────────────────────────────────────────────────────

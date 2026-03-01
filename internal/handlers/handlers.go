@@ -7,12 +7,17 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-playground/validator/v10"
+	"github.com/stripe/stripe-go/v76"
+	"github.com/stripe/stripe-go/v76/checkout/session"
+	"github.com/stripe/stripe-go/v76/customer"
+	"github.com/stripe/stripe-go/v76/webhook"
 	"quoteflow-backend/config"
 	"quoteflow-backend/internal/middleware"
 	"quoteflow-backend/internal/models"
@@ -93,6 +98,19 @@ func validationErrorMsg(err error) string {
 func currentUser(r *http.Request) *models.User {
 	user, _ := middleware.UserFromContext(r.Context())
 	return user
+}
+
+func getSubscriptionCustomerID(sub *stripe.Subscription, raw json.RawMessage) string {
+	if sub.Customer != nil {
+		return sub.Customer.ID
+	}
+	var m struct {
+		Customer string `json:"customer"`
+	}
+	if json.Unmarshal(raw, &m) == nil {
+		return m.Customer
+	}
+	return ""
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -408,6 +426,187 @@ func (h *Handler) DeleteAPIKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.ok(w, map[string]bool{"deleted": true})
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BILLING (Stripe)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// CreateCheckoutSessionRequest — POST /billing/create-checkout-session
+type CreateCheckoutSessionRequest struct {
+	Plan     string `json:"plan" validate:"required,oneof=pro business"`
+	Interval string `json:"interval" validate:"required,oneof=monthly annual"`
+}
+
+// POST /billing/create-checkout-session
+func (h *Handler) CreateCheckoutSession(w http.ResponseWriter, r *http.Request) {
+	if h.cfg.StripeSecretKey == "" || h.cfg.StripePriceProMonthly == "" {
+		h.err(w, http.StatusServiceUnavailable, "billing not configured")
+		return
+	}
+	user := currentUser(r)
+	var req CreateCheckoutSessionRequest
+	if err := h.decode(r, &req); err != nil {
+		h.err(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if err := h.validateRequest(&req); err != nil {
+		h.err(w, http.StatusBadRequest, validationErrorMsg(err))
+		return
+	}
+	var priceID string
+	switch req.Plan + "_" + req.Interval {
+	case "pro_monthly":
+		priceID = h.cfg.StripePriceProMonthly
+	case "pro_annual":
+		priceID = h.cfg.StripePriceProAnnual
+	case "business_monthly":
+		priceID = h.cfg.StripePriceBusinessMonthly
+	case "business_annual":
+		priceID = h.cfg.StripePriceBusinessAnnual
+	default:
+		h.err(w, http.StatusBadRequest, "invalid plan or interval")
+		return
+	}
+	if priceID == "" {
+		h.err(w, http.StatusBadRequest, "price not configured for this plan")
+		return
+	}
+	stripe.Key = h.cfg.StripeSecretKey
+	profile, _ := h.db.GetProfile(r.Context(), user.ID)
+	customerID := ""
+	if profile != nil && profile.StripeCustomerID != "" {
+		customerID = profile.StripeCustomerID
+	} else {
+		params := &stripe.CustomerParams{
+			Email: stripe.String(user.Email),
+			Metadata: map[string]string{
+				"user_id": user.ID,
+			},
+		}
+		c, err := customer.New(params)
+		if err != nil {
+			h.err(w, http.StatusInternalServerError, "failed to create customer")
+			return
+		}
+		customerID = c.ID
+		if profile != nil {
+			_ = h.db.UpdateProfilePlan(r.Context(), user.ID, profile.Plan, customerID)
+		}
+	}
+	successURL := strings.TrimSuffix(h.cfg.FrontendURL, "/") + "/app/settings?panel=billing&success=true"
+	cancelURL := strings.TrimSuffix(h.cfg.FrontendURL, "/") + "/app/settings?panel=billing"
+	sessParams := &stripe.CheckoutSessionParams{
+		Customer:          stripe.String(customerID),
+		ClientReferenceID: stripe.String(user.ID),
+		Mode:              stripe.String(string(stripe.CheckoutSessionModeSubscription)),
+		SuccessURL:        stripe.String(successURL),
+		CancelURL:         stripe.String(cancelURL),
+		Metadata:          map[string]string{"plan": req.Plan},
+		LineItems: []*stripe.CheckoutSessionLineItemParams{
+			{Price: stripe.String(priceID), Quantity: stripe.Int64(1)},
+		},
+	}
+	sess, err := session.New(sessParams)
+	if err != nil {
+		h.err(w, http.StatusInternalServerError, "failed to create checkout session")
+		return
+	}
+	h.ok(w, map[string]string{"url": sess.URL})
+}
+
+// POST /billing/webhook — Stripe webhook (no auth, verify signature)
+func (h *Handler) StripeWebhook(w http.ResponseWriter, r *http.Request) {
+	if h.cfg.StripeWebhookSecret == "" {
+		h.err(w, http.StatusServiceUnavailable, "webhook not configured")
+		return
+	}
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		h.err(w, http.StatusBadRequest, "failed to read body")
+		return
+	}
+	sig := r.Header.Get("Stripe-Signature")
+	event, err := webhook.ConstructEvent(body, sig, h.cfg.StripeWebhookSecret)
+	if err != nil {
+		h.err(w, http.StatusBadRequest, "invalid signature")
+		return
+	}
+	switch event.Type {
+	case "checkout.session.completed":
+		var sess stripe.CheckoutSession
+		if err := json.Unmarshal(event.Data.Raw, &sess); err != nil {
+			h.err(w, http.StatusBadRequest, "invalid payload")
+			return
+		}
+		userID := sess.ClientReferenceID
+		if userID == "" {
+			userID = sess.Metadata["user_id"]
+		}
+		if userID == "" {
+			profile, _ := h.db.GetProfileByStripeCustomerID(r.Context(), sess.Customer.ID)
+			if profile != nil {
+				userID = profile.UserID
+			}
+		}
+		if userID == "" {
+			h.err(w, http.StatusBadRequest, "cannot determine user")
+			return
+		}
+		plan := "pro"
+		if p, ok := sess.Metadata["plan"]; ok && p != "" {
+			plan = p
+		}
+		custID := ""
+		if sess.Customer != nil {
+			custID = sess.Customer.ID
+		} else {
+			var raw struct {
+				Customer string `json:"customer"`
+			}
+			_ = json.Unmarshal(event.Data.Raw, &raw)
+			custID = raw.Customer
+		}
+		_ = h.db.UpdateProfilePlan(r.Context(), userID, plan, custID)
+	case "customer.subscription.deleted":
+		var sub stripe.Subscription
+		if err := json.Unmarshal(event.Data.Raw, &sub); err != nil {
+			h.err(w, http.StatusBadRequest, "invalid payload")
+			return
+		}
+		custID := getSubscriptionCustomerID(&sub, event.Data.Raw)
+		profile, err := h.db.GetProfileByStripeCustomerID(r.Context(), custID)
+		if err != nil || profile == nil {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		_ = h.db.UpdateProfilePlan(r.Context(), profile.UserID, "free", profile.StripeCustomerID)
+	case "customer.subscription.updated":
+		var sub stripe.Subscription
+		if err := json.Unmarshal(event.Data.Raw, &sub); err != nil {
+			h.err(w, http.StatusBadRequest, "invalid payload")
+			return
+		}
+		custID := getSubscriptionCustomerID(&sub, event.Data.Raw)
+		profile, err := h.db.GetProfileByStripeCustomerID(r.Context(), custID)
+		if err != nil || profile == nil {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		plan := "free"
+		if sub.Status == stripe.SubscriptionStatusActive && len(sub.Items.Data) > 0 {
+			priceID := sub.Items.Data[0].Price.ID
+			if priceID == h.cfg.StripePriceBusinessMonthly || priceID == h.cfg.StripePriceBusinessAnnual {
+				plan = "business"
+			} else {
+				plan = "pro"
+			}
+		}
+		_ = h.db.UpdateProfilePlan(r.Context(), profile.UserID, plan, profile.StripeCustomerID)
+	default:
+		// Ignore other events
+	}
+	w.WriteHeader(http.StatusOK)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

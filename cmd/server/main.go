@@ -75,6 +75,9 @@ func main() {
 		r.Post("/reminders", h.CronReminders)
 	})
 
+	// Stripe webhook (no auth, verify Stripe signature)
+	r.With(apiLimiter.Limit).Post("/billing/webhook", h.StripeWebhook)
+
 	// Public quote viewer — clients open these from WhatsApp/email links
 	r.Route("/q/{token}", func(r chi.Router) {
 		r.Use(publicLimiter.Limit)
@@ -111,6 +114,9 @@ func main() {
 		r.Get("/api-keys", h.ListAPIKeys)
 		r.Post("/api-keys", h.CreateAPIKey)
 		r.Delete("/api-keys/{id}", h.DeleteAPIKey)
+
+		// Billing (Stripe)
+		r.Post("/billing/create-checkout-session", h.CreateCheckoutSession)
 
 		// Templates
 		r.Get("/templates", h.ListTemplates)
