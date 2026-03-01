@@ -1074,11 +1074,17 @@ func (db *DB) DeleteTemplate(ctx context.Context, templateID, userID string) err
 // ─────────────────────────────────────────────────────────────────────────────
 
 func (db *DB) GetDashboardStats(ctx context.Context, userID string, currencyFilter string) (*models.DashboardStats, error) {
-	// Fetch currencies used (distinct) for tab buttons
-	curRaw, _, err := db.client.From("quotes").
-		Select("currency", "exact", false).
-		Eq("user_id", userID).
-		Execute()
+	teamID, uid := db.userOrTeamFilter(ctx, userID)
+
+	// Base quotes query: team or user scoped
+	curQuery := db.client.From("quotes").Select("currency", "exact", false).
+		Gte("created_at", time.Now().AddDate(0, -12, 0).Format(time.RFC3339))
+	if teamID != "" {
+		curQuery = curQuery.Eq("team_id", teamID)
+	} else {
+		curQuery = curQuery.Eq("user_id", uid)
+	}
+	curRaw, _, err := curQuery.Execute()
 	if err != nil {
 		return nil, err
 	}
@@ -1103,8 +1109,12 @@ func (db *DB) GetDashboardStats(ctx context.Context, userID string, currencyFilt
 	// Build quotes query
 	q := db.client.From("quotes").
 		Select("status,total,currency,created_at,accepted_at", "exact", false).
-		Eq("user_id", userID).
 		Gte("created_at", time.Now().AddDate(0, -12, 0).Format(time.RFC3339))
+	if teamID != "" {
+		q = q.Eq("team_id", teamID)
+	} else {
+		q = q.Eq("user_id", uid)
+	}
 	if currencyFilter != "" {
 		q = q.Eq("currency", currencyFilter)
 	}
@@ -1179,8 +1189,16 @@ func (db *DB) GetDashboardStats(ctx context.Context, userID string, currencyFilt
 		}
 	}
 
-	// Quotes created this month: use quote_events so it matches free tier limit (deletion doesn't free a slot)
-	stats.QuotesCreatedThisMonth, _ = db.CountQuotesThisMonth(ctx, userID)
+	// Quotes created this month: from rows when team, else quote_events for free tier
+	if teamID != "" {
+		for _, r := range rows {
+			if r.CreatedAt.After(thisMonthStart) {
+				stats.QuotesCreatedThisMonth++
+			}
+		}
+	} else {
+		stats.QuotesCreatedThisMonth, _ = db.CountQuotesThisMonth(ctx, userID)
+	}
 
 	// Acceptance rate (sent + accepted out of all non-draft)
 	nonDraft := stats.SentCount + stats.AcceptedCount + stats.ExpiredCount
@@ -1189,7 +1207,7 @@ func (db *DB) GetDashboardStats(ctx context.Context, userID string, currencyFilt
 	}
 
 	// Recent activity
-	stats.RecentActivity, _ = db.GetRecentActivity(ctx, userID, 10)
+	stats.RecentActivity, _ = db.getRecentActivity(ctx, userID, teamID, 10)
 
 	return stats, nil
 }
@@ -1212,7 +1230,59 @@ func (db *DB) LogEvent(ctx context.Context, userID, quoteID, eventType, message 
 	return err
 }
 
-func (db *DB) GetRecentActivity(ctx context.Context, userID string, limit int) ([]models.ActivityItem, error) {
+// getRecentActivity returns activity for user (or team when teamID is set).
+func (db *DB) getRecentActivity(ctx context.Context, userID, teamID string, limit int) ([]models.ActivityItem, error) {
+	if teamID != "" {
+		// Get quote IDs for the team
+		qRaw, _, err := db.client.From("quotes").
+			Select("id", "exact", false).
+			Eq("team_id", teamID).
+			Execute()
+		if err != nil {
+			return nil, err
+		}
+		var qRows []struct{ ID string `json:"id"` }
+		if err := decode(qRaw, &qRows); err != nil {
+			return nil, err
+		}
+		if len(qRows) == 0 {
+			return nil, nil
+		}
+		quoteIDs := make([]string, len(qRows))
+		for i, r := range qRows {
+			quoteIDs[i] = r.ID
+		}
+		raw, _, err := db.client.From("quote_events").
+			Select("*", "exact", false).
+			In("quote_id", quoteIDs).
+			Order("occurred_at", &postgrest.OrderOpts{Ascending: false}).
+			Limit(limit, "").
+			Execute()
+		if err != nil {
+			return nil, err
+		}
+		var events []struct {
+			ID         string    `json:"id"`
+			QuoteID    string    `json:"quote_id"`
+			EventType  string    `json:"event_type"`
+			Message    string    `json:"message"`
+			OccurredAt time.Time `json:"occurred_at"`
+		}
+		if err := decode(raw, &events); err != nil {
+			return nil, err
+		}
+		items := make([]models.ActivityItem, len(events))
+		for i, e := range events {
+			items[i] = models.ActivityItem{
+				ID:         e.ID,
+				Type:       e.EventType,
+				Message:    e.Message,
+				QuoteID:    e.QuoteID,
+				OccurredAt: e.OccurredAt,
+			}
+		}
+		return items, nil
+	}
 	raw, _, err := db.client.From("quote_events").
 		Select("*", "exact", false).
 		Eq("user_id", userID).
