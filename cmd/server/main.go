@@ -94,6 +94,12 @@ func main() {
 		r.Get("/profile", h.GetProfile)
 		r.Put("/profile", h.UpdateProfile)
 
+		// Templates
+		r.Get("/templates", h.ListTemplates)
+		r.Post("/templates", h.CreateTemplate)
+		r.Post("/templates/from-quote", h.CreateTemplateFromQuote)
+		r.Delete("/templates/{id}", h.DeleteTemplate)
+
 		// Clients
 		r.Route("/clients", func(r chi.Router) {
 			r.Get("/",        h.ListClients)

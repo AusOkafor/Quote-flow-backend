@@ -746,6 +746,72 @@ func (h *Handler) MarkNotesRead(w http.ResponseWriter, r *http.Request) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// QUOTE TEMPLATES
+// ─────────────────────────────────────────────────────────────────────────────
+
+// GET /templates — list user's templates
+func (h *Handler) ListTemplates(w http.ResponseWriter, r *http.Request) {
+	user := currentUser(r)
+	templates, err := h.db.ListTemplates(r.Context(), user.ID)
+	if err != nil {
+		h.err(w, http.StatusInternalServerError, "failed to load templates")
+		return
+	}
+	h.ok(w, templates)
+}
+
+// POST /templates — create template from scratch
+func (h *Handler) CreateTemplate(w http.ResponseWriter, r *http.Request) {
+	user := currentUser(r)
+	var req models.CreateTemplateRequest
+	if err := h.decode(r, &req); err != nil {
+		h.err(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if err := h.validateRequest(&req); err != nil {
+		h.err(w, http.StatusBadRequest, validationErrorMsg(err))
+		return
+	}
+	tpl, err := h.db.CreateTemplate(r.Context(), user.ID, &req)
+	if err != nil {
+		h.err(w, http.StatusInternalServerError, "failed to create template")
+		return
+	}
+	h.created(w, tpl)
+}
+
+// POST /templates/from-quote — create template from existing quote
+func (h *Handler) CreateTemplateFromQuote(w http.ResponseWriter, r *http.Request) {
+	user := currentUser(r)
+	var req models.CreateTemplateFromQuoteRequest
+	if err := h.decode(r, &req); err != nil {
+		h.err(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if err := h.validateRequest(&req); err != nil {
+		h.err(w, http.StatusBadRequest, validationErrorMsg(err))
+		return
+	}
+	tpl, err := h.db.CreateTemplateFromQuote(r.Context(), user.ID, req.Name, req.QuoteID)
+	if err != nil {
+		h.err(w, http.StatusNotFound, "quote not found")
+		return
+	}
+	h.created(w, tpl)
+}
+
+// DELETE /templates/:id
+func (h *Handler) DeleteTemplate(w http.ResponseWriter, r *http.Request) {
+	user := currentUser(r)
+	id := chi.URLParam(r, "id")
+	if err := h.db.DeleteTemplate(r.Context(), id, user.ID); err != nil {
+		h.err(w, http.StatusNotFound, "template not found")
+		return
+	}
+	h.ok(w, map[string]bool{"deleted": true})
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // HEALTH CHECK
 // ─────────────────────────────────────────────────────────────────────────────
 

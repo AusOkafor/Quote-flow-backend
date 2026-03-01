@@ -251,6 +251,65 @@ type LineItemInput struct {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// QUOTE TEMPLATES
+// ─────────────────────────────────────────────────────────────────────────────
+
+type QuoteTemplate struct {
+	ID                string             `json:"id" db:"id"`
+	UserID            string             `json:"user_id" db:"user_id"`
+	Name              string             `json:"name" db:"name"`
+	Title             string             `json:"title" db:"title"`
+	Currency          string             `json:"currency" db:"currency"`
+	ValidityDays      int                `json:"validity_days" db:"validity_days"`
+	Notes             string             `json:"notes" db:"notes"`
+	Deposit           string             `json:"deposit" db:"deposit"`
+	PaymentMethod     string             `json:"payment_method" db:"payment_method"`
+	DeliveryTimeline  string             `json:"delivery_timeline" db:"delivery_timeline"`
+	Revisions         string             `json:"revisions" db:"revisions"`
+	TaxExempt         bool               `json:"tax_exempt" db:"tax_exempt"`
+	TaxRate           float64            `json:"tax_rate" db:"tax_rate"`
+	RequireSignature  bool               `json:"require_signature" db:"require_signature"`
+	TrackViews        bool               `json:"track_views" db:"track_views"`
+	SendReminder      bool               `json:"send_reminder" db:"send_reminder"`
+	CreatedAt         time.Time          `json:"created_at" db:"created_at"`
+	LineItems         []TemplateLineItem `json:"line_items,omitempty" db:"-"`
+}
+
+type TemplateLineItem struct {
+	ID          string  `json:"id" db:"id"`
+	TemplateID  string  `json:"template_id" db:"template_id"`
+	Position    int     `json:"position" db:"position"`
+	Description string  `json:"description" db:"description"`
+	Quantity    float64 `json:"quantity" db:"quantity"`
+	UnitPrice   float64 `json:"unit_price" db:"unit_price"`
+}
+
+// CreateTemplateRequest — POST /templates (from scratch)
+type CreateTemplateRequest struct {
+	Name              string           `json:"name" validate:"required,min=1"`
+	Title             string           `json:"title"`
+	Currency          string           `json:"currency" validate:"required,oneof=JMD USD TTD BBD"`
+	ValidityDays      int              `json:"validity_days" validate:"required,min=1,max=365"`
+	Notes             string           `json:"notes"`
+	Deposit           string           `json:"deposit"`
+	PaymentMethod     string           `json:"payment_method"`
+	DeliveryTimeline  string           `json:"delivery_timeline"`
+	Revisions         string           `json:"revisions"`
+	TaxExempt         bool             `json:"tax_exempt"`
+	TaxRate           float64          `json:"tax_rate"`
+	RequireSignature  bool             `json:"require_signature"`
+	TrackViews        bool             `json:"track_views"`
+	SendReminder      bool             `json:"send_reminder"`
+	LineItems         []LineItemInput   `json:"line_items" validate:"required,min=1,dive"`
+}
+
+// CreateTemplateFromQuoteRequest — POST /templates/from-quote (from existing quote)
+type CreateTemplateFromQuoteRequest struct {
+	Name    string `json:"name" validate:"required,min=1"`
+	QuoteID string `json:"quote_id" validate:"required,uuid"`
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // DASHBOARD / ANALYTICS
 // ─────────────────────────────────────────────────────────────────────────────
 

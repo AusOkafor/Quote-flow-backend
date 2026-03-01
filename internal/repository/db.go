@@ -764,6 +764,144 @@ func (db *DB) GetQuoteIDsWithUnreadNotes(ctx context.Context, userID string) (ma
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// QUOTE TEMPLATES
+// ─────────────────────────────────────────────────────────────────────────────
+
+func (db *DB) ListTemplates(ctx context.Context, userID string) ([]models.QuoteTemplate, error) {
+	raw, _, err := db.client.From("quote_templates").
+		Select("*", "exact", false).
+		Eq("user_id", userID).
+		Order("created_at", &postgrest.OrderOpts{Ascending: false}).
+		Execute()
+	if err != nil {
+		return nil, err
+	}
+	var templates []models.QuoteTemplate
+	if err := decode(raw, &templates); err != nil {
+		return nil, err
+	}
+	for i := range templates {
+		items, _ := db.getTemplateLineItems(ctx, templates[i].ID)
+		templates[i].LineItems = items
+	}
+	return templates, nil
+}
+
+func (db *DB) getTemplateLineItems(ctx context.Context, templateID string) ([]models.TemplateLineItem, error) {
+	raw, _, err := db.client.From("template_line_items").
+		Select("*", "exact", false).
+		Eq("template_id", templateID).
+		Order("position", &postgrest.OrderOpts{Ascending: true}).
+		Execute()
+	if err != nil {
+		return nil, err
+	}
+	var items []models.TemplateLineItem
+	if err := decode(raw, &items); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+func (db *DB) CreateTemplate(ctx context.Context, userID string, req *models.CreateTemplateRequest) (*models.QuoteTemplate, error) {
+	row := map[string]interface{}{
+		"user_id":            userID,
+		"name":               req.Name,
+		"title":              defaultIfEmpty(req.Title, "Quote"),
+		"currency":           req.Currency,
+		"validity_days":      req.ValidityDays,
+		"notes":              req.Notes,
+		"deposit":            req.Deposit,
+		"payment_method":     req.PaymentMethod,
+		"delivery_timeline":   req.DeliveryTimeline,
+		"revisions":          req.Revisions,
+		"tax_exempt":         req.TaxExempt,
+		"tax_rate":           req.TaxRate,
+		"require_signature":  req.RequireSignature,
+		"track_views":        req.TrackViews,
+		"send_reminder":      req.SendReminder,
+	}
+	raw, _, err := db.client.From("quote_templates").
+		Insert(row, false, "", "representation", "").
+		Execute()
+	if err != nil {
+		return nil, err
+	}
+	var templates []models.QuoteTemplate
+	if err := decode(raw, &templates); err != nil || len(templates) == 0 {
+		return nil, fmt.Errorf("create template failed")
+	}
+	tpl := &templates[0]
+
+	liRows := make([]map[string]interface{}, 0, len(req.LineItems))
+	for i, item := range req.LineItems {
+		desc := strings.TrimSpace(item.Description)
+		if desc == "" {
+			desc = "Line item"
+		}
+		liRows = append(liRows, map[string]interface{}{
+			"template_id":  tpl.ID,
+			"position":     i,
+			"description":  desc,
+			"quantity":     item.Quantity,
+			"unit_price":   item.UnitPrice,
+		})
+	}
+	if len(liRows) > 0 {
+		_, _, err = db.client.From("template_line_items").
+			Insert(liRows, false, "", "representation", "").
+			Execute()
+		if err != nil {
+			return nil, fmt.Errorf("create template line items: %w", err)
+		}
+	}
+	tpl.LineItems, _ = db.getTemplateLineItems(ctx, tpl.ID)
+	return tpl, nil
+}
+
+func (db *DB) CreateTemplateFromQuote(ctx context.Context, userID string, name, quoteID string) (*models.QuoteTemplate, error) {
+	quote, err := db.GetQuote(ctx, quoteID, userID)
+	if err != nil {
+		return nil, err
+	}
+	items := make([]models.LineItemInput, 0, len(quote.LineItems))
+	for _, li := range quote.LineItems {
+		items = append(items, models.LineItemInput{
+			Description: li.Description,
+			Quantity:    li.Quantity,
+			UnitPrice:   li.UnitPrice,
+		})
+	}
+	req := &models.CreateTemplateRequest{
+		Name:              name,
+		Title:             quote.Title,
+		Currency:          quote.Currency,
+		ValidityDays:      quote.ValidityDays,
+		Notes:             quote.Notes,
+		Deposit:           quote.Deposit,
+		PaymentMethod:     quote.PaymentMethod,
+		DeliveryTimeline:  quote.DeliveryTimeline,
+		Revisions:         quote.Revisions,
+		TaxExempt:         quote.TaxExempt,
+		TaxRate:           quote.TaxRate,
+		RequireSignature:  quote.RequireSignature,
+		TrackViews:        quote.TrackViews,
+		SendReminder:      quote.SendReminder,
+		LineItems:         items,
+	}
+	return db.CreateTemplate(ctx, userID, req)
+}
+
+func (db *DB) DeleteTemplate(ctx context.Context, templateID, userID string) error {
+	_, _, err := db.client.From("quote_templates").
+		Delete("*", "").
+		Eq("id", templateID).
+		Eq("user_id", userID).
+		Execute()
+	return err
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // DASHBOARD STATS
 // ─────────────────────────────────────────────────────────────────────────────
 
