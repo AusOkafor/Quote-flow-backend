@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/hmac"
 	"crypto/sha256"
+	"io"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -32,6 +33,14 @@ func NewPaymentService(cfg *config.Config) *PaymentService {
 		cfg:    cfg,
 		client: &http.Client{Timeout: 30 * time.Second},
 	}
+}
+
+// payPalBaseURL returns the PayPal API base URL (sandbox or live).
+func (p *PaymentService) payPalBaseURL() string {
+	if strings.ToLower(p.cfg.PayPalEnvironment) == "live" {
+		return "https://api.paypal.com"
+	}
+	return "https://api.sandbox.paypal.com"
 }
 
 // ── STRIPE ────────────────────────────────────────────────────────────────────
@@ -275,7 +284,7 @@ func (p *PaymentService) CreatePayPalOnboardingLink(userID string) (string, erro
 		},
 	}
 	bodyBytes, _ := json.Marshal(body)
-	req, _ := http.NewRequest("POST", "https://api.paypal.com/v2/customer/partner-referrals", bytes.NewReader(bodyBytes))
+	req, _ := http.NewRequest("POST", p.payPalBaseURL()+"/v2/customer/partner-referrals", bytes.NewReader(bodyBytes))
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 
@@ -354,7 +363,7 @@ func (p *PaymentService) CreatePayPalOrder(
 		},
 	}
 	bodyBytes, _ := json.Marshal(body)
-	req, _ := http.NewRequest("POST", "https://api.paypal.com/v2/checkout/orders", bytes.NewReader(bodyBytes))
+	req, _ := http.NewRequest("POST", p.payPalBaseURL()+"/v2/checkout/orders", bytes.NewReader(bodyBytes))
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 	if p.cfg.PayPalBNCode != "" {
@@ -396,7 +405,7 @@ func (p *PaymentService) getPayPalPlatformToken() (string, error) {
 	}
 	data := url.Values{}
 	data.Set("grant_type", "client_credentials")
-	req, _ := http.NewRequest("POST", "https://api.paypal.com/v1/oauth2/token", strings.NewReader(data.Encode()))
+	req, _ := http.NewRequest("POST", p.payPalBaseURL()+"/v1/oauth2/token", strings.NewReader(data.Encode()))
 	req.SetBasicAuth(p.cfg.PayPalClientID, p.cfg.PayPalClientSecret)
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
@@ -406,11 +415,25 @@ func (p *PaymentService) getPayPalPlatformToken() (string, error) {
 	}
 	defer resp.Body.Close()
 
+	body, _ := io.ReadAll(resp.Body)
 	var result struct {
 		AccessToken string `json:"access_token"`
+		Error       string `json:"error"`
+		ErrorDesc   string `json:"error_description"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", err
+	_ = json.Unmarshal(body, &result)
+
+	if resp.StatusCode != http.StatusOK {
+		if result.ErrorDesc != "" {
+			return "", fmt.Errorf("PayPal: %s", result.ErrorDesc)
+		}
+		if result.Error != "" {
+			return "", fmt.Errorf("PayPal: %s", result.Error)
+		}
+		return "", fmt.Errorf("PayPal auth failed (HTTP %d)", resp.StatusCode)
+	}
+	if result.AccessToken == "" {
+		return "", fmt.Errorf("PayPal: no access token in response")
 	}
 	return result.AccessToken, nil
 }
