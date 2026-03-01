@@ -764,6 +764,93 @@ func (db *DB) GetQuoteIDsWithUnreadNotes(ctx context.Context, userID string) (ma
 	return result, nil
 }
 
+// GetUnreadClientMessages returns unread client notes with quote and client details.
+func (db *DB) GetUnreadClientMessages(ctx context.Context, userID string) ([]models.UnreadClientMessage, error) {
+	quoteIDs, err := db.GetQuoteIDsWithUnreadNotes(ctx, userID)
+	if err != nil || len(quoteIDs) == 0 {
+		return nil, err
+	}
+	ids := make([]string, 0, len(quoteIDs))
+	for id := range quoteIDs {
+		ids = append(ids, id)
+	}
+	raw, _, err := db.client.From("quote_notes").
+		Select("quote_id,message,author_name,note_type,created_at", "exact", false).
+		Eq("author_type", "client").
+		Is("read_at", "null").
+		In("quote_id", ids).
+		Order("created_at", &postgrest.OrderOpts{Ascending: false}).
+		Execute()
+	if err != nil {
+		return nil, err
+	}
+	type noteRow struct {
+		QuoteID    string    `json:"quote_id"`
+		Message    string    `json:"message"`
+		AuthorName string    `json:"author_name"`
+		NoteType   string    `json:"note_type"`
+		CreatedAt  time.Time `json:"created_at"`
+	}
+	var notes []noteRow
+	if err := decode(raw, &notes); err != nil {
+		return nil, err
+	}
+	seen := make(map[string]bool)
+	var latest []noteRow
+	for _, n := range notes {
+		if !seen[n.QuoteID] {
+			seen[n.QuoteID] = true
+			latest = append(latest, n)
+		}
+	}
+	if len(latest) == 0 {
+		return nil, nil
+	}
+	raw2, _, err := db.client.From("quotes").
+		Select("id,quote_number,client:clients(name)", "exact", false).
+		In("id", ids).
+		Execute()
+	if err != nil {
+		return nil, err
+	}
+	type quoteRow struct {
+		ID          string `json:"id"`
+		QuoteNumber string `json:"quote_number"`
+		Client      struct {
+			Name string `json:"name"`
+		} `json:"client"`
+	}
+	var quotes []quoteRow
+	if err := decode(raw2, &quotes); err != nil {
+		return nil, err
+	}
+	qmap := make(map[string]quoteRow)
+	for _, q := range quotes {
+		qmap[q.ID] = q
+	}
+	result := make([]models.UnreadClientMessage, 0, len(latest))
+	for _, n := range latest {
+		q, ok := qmap[n.QuoteID]
+		if !ok {
+			continue
+		}
+		noteType := n.NoteType
+		if noteType == "" {
+			noteType = "message"
+		}
+		result = append(result, models.UnreadClientMessage{
+			QuoteID:     n.QuoteID,
+			QuoteNumber: q.QuoteNumber,
+			ClientName:  q.Client.Name,
+			AuthorName:  n.AuthorName,
+			Message:     n.Message,
+			NoteType:    noteType,
+			CreatedAt:   n.CreatedAt,
+		})
+	}
+	return result, nil
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // QUOTE TEMPLATES
 // ─────────────────────────────────────────────────────────────────────────────

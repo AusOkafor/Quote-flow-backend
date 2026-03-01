@@ -350,6 +350,17 @@ type ActivityItem struct {
 	OccurredAt  time.Time `json:"occurred_at"`
 }
 
+// UnreadClientMessage is a client note the freelancer hasn't seen yet.
+type UnreadClientMessage struct {
+	QuoteID       string    `json:"quote_id"`
+	QuoteNumber   string    `json:"quote_number"`
+	ClientName    string    `json:"client_name"`
+	AuthorName    string    `json:"author_name"`    // name client used when posting
+	Message       string    `json:"message"`
+	NoteType      string    `json:"note_type"`      // message | change_request
+	CreatedAt     time.Time `json:"created_at"`
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // AUTH
 // ─────────────────────────────────────────────────────────────────────────────

@@ -139,6 +139,17 @@ func (h *Handler) GetDashboard(w http.ResponseWriter, r *http.Request) {
 	h.ok(w, stats)
 }
 
+// GET /dashboard/unread-messages — unread client notes for toast notifications
+func (h *Handler) GetUnreadMessages(w http.ResponseWriter, r *http.Request) {
+	user := currentUser(r)
+	msgs, err := h.db.GetUnreadClientMessages(r.Context(), user.ID)
+	if err != nil {
+		h.err(w, http.StatusInternalServerError, "failed to load unread messages")
+		return
+	}
+	h.ok(w, msgs)
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // PROFILE / SETTINGS
 // ─────────────────────────────────────────────────────────────────────────────

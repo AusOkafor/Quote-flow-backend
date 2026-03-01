@@ -89,6 +89,7 @@ func main() {
 
 		// Dashboard & analytics
 		r.Get("/dashboard", h.GetDashboard)
+		r.Get("/dashboard/unread-messages", h.GetUnreadMessages)
 
 		// Profile / settings
 		r.Get("/profile", h.GetProfile)
