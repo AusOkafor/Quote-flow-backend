@@ -100,6 +100,11 @@ func currentUser(r *http.Request) *models.User {
 	return user
 }
 
+// isBusiness returns true if the user has Business plan or is the dev bypass user.
+func (h *Handler) isBusiness(userID string, profile *models.Profile) bool {
+	return (profile != nil && profile.Plan == "business") || h.cfg.IsDevBypassUser(userID)
+}
+
 func getSubscriptionCustomerID(sub *stripe.Subscription, raw json.RawMessage) string {
 	if sub.Customer != nil {
 		return sub.Customer.ID
@@ -126,6 +131,11 @@ func (h *Handler) GetMe(w http.ResponseWriter, r *http.Request) {
 		// Profile auto-created by DB trigger; return minimal data
 		h.ok(w, map[string]interface{}{"user": user, "profile": nil})
 		return
+	}
+	if h.cfg.IsDevBypassUser(user.ID) {
+		p := *profile
+		p.Plan = "business"
+		profile = &p
 	}
 	h.ok(w, map[string]interface{}{"user": user, "profile": profile})
 }
@@ -269,7 +279,7 @@ func (h *Handler) AddTeamMember(w http.ResponseWriter, r *http.Request) {
 	user := currentUser(r)
 	id := chi.URLParam(r, "id")
 	profile, _ := h.db.GetProfile(r.Context(), user.ID)
-	if profile == nil || profile.Plan != "business" {
+	if !h.isBusiness(user.ID, profile) {
 		h.json(w, http.StatusPaymentRequired, models.APIResponse{
 			Success: false,
 			Error:   "business_required",
@@ -349,7 +359,7 @@ func (h *Handler) RemoveTeamMember(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) ListAPIKeys(w http.ResponseWriter, r *http.Request) {
 	user := currentUser(r)
 	profile, _ := h.db.GetProfile(r.Context(), user.ID)
-	if profile == nil || profile.Plan != "business" {
+	if !h.isBusiness(user.ID, profile) {
 		h.json(w, http.StatusPaymentRequired, models.APIResponse{
 			Success: false,
 			Error:   "business_required",
@@ -369,7 +379,7 @@ func (h *Handler) ListAPIKeys(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) CreateAPIKey(w http.ResponseWriter, r *http.Request) {
 	user := currentUser(r)
 	profile, _ := h.db.GetProfile(r.Context(), user.ID)
-	if profile == nil || profile.Plan != "business" {
+	if !h.isBusiness(user.ID, profile) {
 		h.json(w, http.StatusPaymentRequired, models.APIResponse{
 			Success: false,
 			Error:   "business_required",
@@ -412,7 +422,7 @@ func (h *Handler) CreateAPIKey(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) DeleteAPIKey(w http.ResponseWriter, r *http.Request) {
 	user := currentUser(r)
 	profile, _ := h.db.GetProfile(r.Context(), user.ID)
-	if profile == nil || profile.Plan != "business" {
+	if !h.isBusiness(user.ID, profile) {
 		h.json(w, http.StatusPaymentRequired, models.APIResponse{
 			Success: false,
 			Error:   "business_required",
@@ -626,6 +636,11 @@ func (h *Handler) GetProfile(w http.ResponseWriter, r *http.Request) {
 		// New users may not have a profile yet; return 404 so frontend can show empty form
 		h.err(w, http.StatusNotFound, "profile not found")
 		return
+	}
+	if h.cfg.IsDevBypassUser(user.ID) {
+		p := *profile
+		p.Plan = "business"
+		profile = &p
 	}
 	h.ok(w, profile)
 }
