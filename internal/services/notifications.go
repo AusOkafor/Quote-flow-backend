@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"html"
 	"net/http"
 	"net/url"
 	"strings"
@@ -126,6 +127,34 @@ func (n *NotificationService) SendQuoteViewedNotification(quote *models.Quote, c
 	</div>`, clientName, quote.QuoteNumber, quote.ViewCount+1, n.cfg.AppURL)
 
 	subject := fmt.Sprintf("👁 %s viewed your quote %s", clientName, quote.QuoteNumber)
+	return n.sendEmail(freelancerEmail, subject, html)
+}
+
+// SendChangeRequestNotification notifies the freelancer that the client requested changes.
+func (n *NotificationService) SendChangeRequestNotification(quote *models.Quote, clientName, requesterName, requestMessage, freelancerEmail string) error {
+	displayName := requesterName
+	if displayName == "" {
+		displayName = clientName
+	}
+	if displayName == "" {
+		displayName = "The client"
+	}
+	html := fmt.Sprintf(`
+	<div style="font-family:sans-serif;max-width:560px;margin:0 auto;padding:32px;">
+	  <h2 style="color:#E85C2F;margin-bottom:8px;">✏️ Change Request</h2>
+	  <p style="color:#555;font-size:15px;line-height:1.6;">
+	    <strong>%s</strong> has requested changes to your quote <strong>%s</strong>.
+	  </p>
+	  <div style="background:#F5F2EC;border-radius:10px;padding:18px;margin:20px 0;border-left:4px solid #E85C2F;">
+	    <p style="margin:0;font-size:14px;color:#333;line-height:1.6;white-space:pre-wrap;">%s</p>
+	  </div>
+	  <p style="color:#555;font-size:14px;">The quote has been moved back to draft. Make your edits and re-send when ready.</p>
+	  <a href="%s/app" style="display:inline-block;margin-top:20px;background:#E85C2F;color:#fff;padding:13px 28px;border-radius:8px;text-decoration:none;font-weight:600;">
+	    View &amp; Edit in QuoteFlow →
+	  </a>
+	</div>`, displayName, quote.QuoteNumber, html.EscapeString(requestMessage), n.cfg.AppURL)
+
+	subject := fmt.Sprintf("✏️ %s requested changes to quote %s", displayName, quote.QuoteNumber)
 	return n.sendEmail(freelancerEmail, subject, html)
 }
 

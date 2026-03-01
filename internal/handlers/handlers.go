@@ -656,7 +656,7 @@ func (h *Handler) PublicGetNotes(w http.ResponseWriter, r *http.Request) {
 	h.ok(w, notes)
 }
 
-// POST /q/:token/notes — public, client posts a note
+// POST /q/:token/notes — public, client posts a note (or change request)
 func (h *Handler) PublicPostNote(w http.ResponseWriter, r *http.Request) {
 	token := chi.URLParam(r, "token")
 	quote, err := h.db.GetQuoteByShareToken(r.Context(), token)
@@ -673,10 +673,25 @@ func (h *Handler) PublicPostNote(w http.ResponseWriter, r *http.Request) {
 		h.err(w, http.StatusBadRequest, validationErrorMsg(err))
 		return
 	}
-	note, err := h.db.AddNote(r.Context(), quote.ID, "client", req.Name, req.Message)
+	noteType := req.NoteType
+	if noteType != "message" && noteType != "change_request" {
+		noteType = "message"
+	}
+	note, err := h.db.AddNote(r.Context(), quote.ID, "client", req.Name, req.Message, noteType)
 	if err != nil {
 		h.err(w, http.StatusInternalServerError, "failed to add note")
 		return
+	}
+	if noteType == "change_request" {
+		_ = h.db.UpdateQuoteStatus(r.Context(), quote.ID, quote.UserID, models.StatusDraft)
+		go func() {
+			bgCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			profile, _ := h.db.GetProfile(bgCtx, quote.UserID)
+			if profile != nil && profile.EmailOnQuote != "" {
+				_ = h.notif.SendChangeRequestNotification(&quote.Quote, quote.Client.Name, req.Name, req.Message, profile.EmailOnQuote)
+			}
+		}()
 	}
 	h.created(w, note)
 }
@@ -721,7 +736,7 @@ func (h *Handler) PostNote(w http.ResponseWriter, r *http.Request) {
 	if profile != nil && profile.BusinessName != "" {
 		authorName = profile.BusinessName
 	}
-	note, err := h.db.AddNote(r.Context(), quote.ID, "freelancer", authorName, req.Message)
+	note, err := h.db.AddNote(r.Context(), quote.ID, "freelancer", authorName, req.Message, "message")
 	if err != nil {
 		h.err(w, http.StatusInternalServerError, "failed to add note")
 		return

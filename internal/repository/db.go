@@ -677,12 +677,16 @@ func (db *DB) GetNotesByShareToken(ctx context.Context, token string) ([]models.
 	return db.GetNotesByQuoteID(ctx, quote.ID)
 }
 
-func (db *DB) AddNote(ctx context.Context, quoteID, authorType, authorName, message string) (*models.QuoteNote, error) {
+func (db *DB) AddNote(ctx context.Context, quoteID, authorType, authorName, message, noteType string) (*models.QuoteNote, error) {
+	if noteType == "" {
+		noteType = "message"
+	}
 	row := map[string]interface{}{
 		"quote_id":    quoteID,
 		"author_type": authorType,
 		"author_name": authorName,
 		"message":     message,
+		"note_type":   noteType,
 	}
 	if authorType == "client" {
 		row["read_at"] = nil

@@ -211,17 +211,19 @@ type AcceptQuoteRequest struct {
 type QuoteNote struct {
 	ID         string     `json:"id" db:"id"`
 	QuoteID    string     `json:"quote_id" db:"quote_id"`
-	AuthorType string     `json:"author_type" db:"author_type"` // client | freelancer
+	AuthorType string     `json:"author_type" db:"author_type"`   // client | freelancer
 	AuthorName string     `json:"author_name" db:"author_name"`
 	Message    string     `json:"message" db:"message"`
+	NoteType   string     `json:"note_type" db:"note_type"`       // message | change_request
 	ReadAt     *time.Time `json:"read_at,omitempty" db:"read_at"`
 	CreatedAt  time.Time  `json:"created_at" db:"created_at"`
 }
 
 // PostNoteRequest (client) — POST /q/:token/notes
 type PostNoteRequest struct {
-	Name    string `json:"name" validate:"required,min=1"`
-	Message string `json:"message" validate:"required,min=1"`
+	Name     string `json:"name" validate:"required,min=1"`
+	Message  string `json:"message" validate:"required,min=1"`
+	NoteType string `json:"note_type"` // message (default) | change_request
 }
 
 // ReplyNoteRequest (freelancer) — POST /quotes/:id/notes
