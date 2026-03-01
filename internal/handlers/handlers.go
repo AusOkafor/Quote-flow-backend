@@ -401,10 +401,20 @@ func (h *Handler) CreateQuote(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// PATCH /quotes/:id — update quote fields and optionally replace line items
+// PATCH /quotes/:id — update quote fields and optionally replace line items (draft only)
 func (h *Handler) UpdateQuote(w http.ResponseWriter, r *http.Request) {
 	user := currentUser(r)
 	id := chi.URLParam(r, "id")
+
+	quote, err := h.db.GetQuote(r.Context(), id, user.ID)
+	if err != nil {
+		h.err(w, http.StatusNotFound, "quote not found")
+		return
+	}
+	if quote.Status != models.StatusDraft {
+		h.err(w, http.StatusBadRequest, "only draft quotes can be edited — sent and accepted quotes cannot be modified")
+		return
+	}
 
 	var req models.UpdateQuoteRequest
 	if err := h.decode(r, &req); err != nil {
