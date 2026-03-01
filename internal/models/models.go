@@ -139,8 +139,9 @@ type Quote struct {
 	UpdatedAt  time.Time  `json:"updated_at" db:"updated_at"`
 
 	// Joined fields
-	Client    *Client    `json:"client,omitempty" db:"-"`
-	LineItems []LineItem `json:"line_items,omitempty" db:"-"`
+	Client         *Client    `json:"client,omitempty" db:"-"`
+	LineItems      []LineItem `json:"line_items,omitempty" db:"-"`
+	HasUnreadNotes bool       `json:"has_unread_notes,omitempty" db:"-"`
 }
 
 // QuoteWithDetails is returned on GET /quotes/:id with client + line items attached.
@@ -201,6 +202,31 @@ type SendQuoteRequest struct {
 // AcceptQuoteRequest is the payload for POST /q/:token/accept (public endpoint)
 type AcceptQuoteRequest struct {
 	SignatureName string `json:"signature_name"` // printed name for e-signature
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// QUOTE NOTES
+// ─────────────────────────────────────────────────────────────────────────────
+
+type QuoteNote struct {
+	ID         string     `json:"id" db:"id"`
+	QuoteID    string     `json:"quote_id" db:"quote_id"`
+	AuthorType string     `json:"author_type" db:"author_type"` // client | freelancer
+	AuthorName string     `json:"author_name" db:"author_name"`
+	Message    string     `json:"message" db:"message"`
+	ReadAt     *time.Time `json:"read_at,omitempty" db:"read_at"`
+	CreatedAt  time.Time  `json:"created_at" db:"created_at"`
+}
+
+// PostNoteRequest (client) — POST /q/:token/notes
+type PostNoteRequest struct {
+	Name    string `json:"name" validate:"required,min=1"`
+	Message string `json:"message" validate:"required,min=1"`
+}
+
+// ReplyNoteRequest (freelancer) — POST /quotes/:id/notes
+type ReplyNoteRequest struct {
+	Message string `json:"message" validate:"required,min=1"`
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

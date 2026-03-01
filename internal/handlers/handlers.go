@@ -285,6 +285,10 @@ func (h *Handler) ListQuotes(w http.ResponseWriter, r *http.Request) {
 		h.err(w, http.StatusInternalServerError, "failed to load quotes")
 		return
 	}
+	unread, _ := h.db.GetQuoteIDsWithUnreadNotes(r.Context(), user.ID)
+	for i := range quotes {
+		quotes[i].HasUnreadNotes = unread[quotes[i].ID]
+	}
 	h.ok(w, quotes)
 }
 
@@ -639,6 +643,106 @@ func (h *Handler) PublicAcceptQuote(w http.ResponseWriter, r *http.Request) {
 		"quote_number": quote.QuoteNumber,
 		"message": "Thank you! Your acceptance has been recorded. The freelancer has been notified.",
 	})
+}
+
+// GET /q/:token/notes — public, returns notes thread for the quote
+func (h *Handler) PublicGetNotes(w http.ResponseWriter, r *http.Request) {
+	token := chi.URLParam(r, "token")
+	notes, err := h.db.GetNotesByShareToken(r.Context(), token)
+	if err != nil {
+		h.err(w, http.StatusNotFound, "quote not found or link has expired")
+		return
+	}
+	h.ok(w, notes)
+}
+
+// POST /q/:token/notes — public, client posts a note
+func (h *Handler) PublicPostNote(w http.ResponseWriter, r *http.Request) {
+	token := chi.URLParam(r, "token")
+	quote, err := h.db.GetQuoteByShareToken(r.Context(), token)
+	if err != nil {
+		h.err(w, http.StatusNotFound, "quote not found or link has expired")
+		return
+	}
+	var req models.PostNoteRequest
+	if err := h.decode(r, &req); err != nil {
+		h.err(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if err := h.validateRequest(&req); err != nil {
+		h.err(w, http.StatusBadRequest, validationErrorMsg(err))
+		return
+	}
+	note, err := h.db.AddNote(r.Context(), quote.ID, "client", req.Name, req.Message)
+	if err != nil {
+		h.err(w, http.StatusInternalServerError, "failed to add note")
+		return
+	}
+	h.created(w, note)
+}
+
+// GET /quotes/:id/notes — authenticated, returns notes thread
+func (h *Handler) GetNotes(w http.ResponseWriter, r *http.Request) {
+	user := currentUser(r)
+	id := chi.URLParam(r, "id")
+	quote, err := h.db.GetQuote(r.Context(), id, user.ID)
+	if err != nil {
+		h.err(w, http.StatusNotFound, "quote not found")
+		return
+	}
+	notes, err := h.db.GetNotesByQuoteID(r.Context(), quote.ID)
+	if err != nil {
+		h.err(w, http.StatusInternalServerError, "failed to load notes")
+		return
+	}
+	h.ok(w, notes)
+}
+
+// POST /quotes/:id/notes — authenticated, freelancer replies
+func (h *Handler) PostNote(w http.ResponseWriter, r *http.Request) {
+	user := currentUser(r)
+	id := chi.URLParam(r, "id")
+	quote, err := h.db.GetQuote(r.Context(), id, user.ID)
+	if err != nil {
+		h.err(w, http.StatusNotFound, "quote not found")
+		return
+	}
+	var req models.ReplyNoteRequest
+	if err := h.decode(r, &req); err != nil {
+		h.err(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if err := h.validateRequest(&req); err != nil {
+		h.err(w, http.StatusBadRequest, validationErrorMsg(err))
+		return
+	}
+	profile, _ := h.db.GetProfile(r.Context(), user.ID)
+	authorName := "You"
+	if profile != nil && profile.BusinessName != "" {
+		authorName = profile.BusinessName
+	}
+	note, err := h.db.AddNote(r.Context(), quote.ID, "freelancer", authorName, req.Message)
+	if err != nil {
+		h.err(w, http.StatusInternalServerError, "failed to add note")
+		return
+	}
+	h.created(w, note)
+}
+
+// PATCH /quotes/:id/notes/read — authenticated, marks client notes as read
+func (h *Handler) MarkNotesRead(w http.ResponseWriter, r *http.Request) {
+	user := currentUser(r)
+	id := chi.URLParam(r, "id")
+	quote, err := h.db.GetQuote(r.Context(), id, user.ID)
+	if err != nil {
+		h.err(w, http.StatusNotFound, "quote not found")
+		return
+	}
+	if err := h.db.MarkNotesAsRead(r.Context(), quote.ID); err != nil {
+		h.err(w, http.StatusInternalServerError, "failed to mark notes as read")
+		return
+	}
+	h.ok(w, map[string]bool{"read": true})
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

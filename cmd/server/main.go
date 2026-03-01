@@ -74,6 +74,8 @@ func main() {
 		r.Use(publicLimiter.Limit)
 		r.Get("/",        h.PublicGetQuote)    // load quote data for viewer
 		r.Post("/accept", h.PublicAcceptQuote) // client accepts the quote
+		r.Get("/notes",   h.PublicGetNotes)    // notes thread (public)
+		r.Post("/notes",  h.PublicPostNote)    // client posts note (public)
 	})
 
 	// ── Protected routes (JWT required) ──────────────────────
@@ -108,12 +110,15 @@ func main() {
 			r.Get("/export", h.ExportQuotesCSV)
 
 			r.Route("/{id}", func(r chi.Router) {
-				r.Get("/",           h.GetQuote)
-				r.Patch("/",         h.UpdateQuote)
-				r.Delete("/",        h.DeleteQuote)
-				r.Post("/send",      h.SendQuote)
-				r.Post("/duplicate", h.DuplicateQuote)
-				r.Post("/mark-paid", h.MarkQuoteAsPaid)
+				r.Get("/",             h.GetQuote)
+				r.Patch("/",           h.UpdateQuote)
+				r.Delete("/",          h.DeleteQuote)
+				r.Post("/send",        h.SendQuote)
+				r.Post("/duplicate",   h.DuplicateQuote)
+				r.Post("/mark-paid",   h.MarkQuoteAsPaid)
+				r.Get("/notes",        h.GetNotes)
+				r.Post("/notes",       h.PostNote)
+				r.Patch("/notes/read", h.MarkNotesRead)
 			})
 		})
 	})

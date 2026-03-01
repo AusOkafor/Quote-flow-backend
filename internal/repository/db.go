@@ -653,6 +653,117 @@ func (db *DB) DeleteQuote(ctx context.Context, id, userID string) error {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// QUOTE NOTES
+// ─────────────────────────────────────────────────────────────────────────────
+
+func (db *DB) GetNotesByQuoteID(ctx context.Context, quoteID string) ([]models.QuoteNote, error) {
+	raw, _, err := db.client.From("quote_notes").
+		Select("*", "exact", false).
+		Eq("quote_id", quoteID).
+		Order("created_at", &postgrest.OrderOpts{Ascending: true}).
+		Execute()
+	if err != nil {
+		return nil, err
+	}
+	var notes []models.QuoteNote
+	return notes, decode(raw, &notes)
+}
+
+func (db *DB) GetNotesByShareToken(ctx context.Context, token string) ([]models.QuoteNote, error) {
+	quote, err := db.GetQuoteByShareToken(ctx, token)
+	if err != nil {
+		return nil, err
+	}
+	return db.GetNotesByQuoteID(ctx, quote.ID)
+}
+
+func (db *DB) AddNote(ctx context.Context, quoteID, authorType, authorName, message string) (*models.QuoteNote, error) {
+	row := map[string]interface{}{
+		"quote_id":    quoteID,
+		"author_type": authorType,
+		"author_name": authorName,
+		"message":     message,
+	}
+	if authorType == "client" {
+		row["read_at"] = nil
+	} else {
+		row["read_at"] = time.Now()
+	}
+	raw, _, err := db.client.From("quote_notes").
+		Insert(row, false, "", "representation", "").
+		Execute()
+	if err != nil {
+		return nil, err
+	}
+	var notes []models.QuoteNote
+	if err := decode(raw, &notes); err != nil || len(notes) == 0 {
+		return nil, fmt.Errorf("insert note failed")
+	}
+	return &notes[0], nil
+}
+
+func (db *DB) MarkNotesAsRead(ctx context.Context, quoteID string) error {
+	now := time.Now()
+	_, _, err := db.client.From("quote_notes").
+		Update(map[string]interface{}{"read_at": now}, "*", "").
+		Eq("quote_id", quoteID).
+		Eq("author_type", "client").
+		Is("read_at", "null").
+		Execute()
+	return err
+}
+
+// GetQuoteIDsWithUnreadNotes returns quote IDs (for the given user) that have unread client notes.
+func (db *DB) GetQuoteIDsWithUnreadNotes(ctx context.Context, userID string) (map[string]bool, error) {
+	raw, _, err := db.client.From("quote_notes").
+		Select("quote_id", "exact", false).
+		Eq("author_type", "client").
+		Is("read_at", "null").
+		Execute()
+	if err != nil {
+		return nil, err
+	}
+	var rows []struct {
+		QuoteID string `json:"quote_id"`
+	}
+	if err := decode(raw, &rows); err != nil {
+		return nil, err
+	}
+	// Filter to only quotes belonging to this user
+	quoteIDs := make(map[string]bool)
+	for _, r := range rows {
+		quoteIDs[r.QuoteID] = true
+	}
+	if len(quoteIDs) == 0 {
+		return quoteIDs, nil
+	}
+	// Verify quotes belong to user
+	ids := make([]string, 0, len(quoteIDs))
+	for id := range quoteIDs {
+		ids = append(ids, id)
+	}
+	raw2, _, err := db.client.From("quotes").
+		Select("id", "exact", false).
+		Eq("user_id", userID).
+		In("id", ids).
+		Execute()
+	if err != nil {
+		return nil, err
+	}
+	var quotes []struct{ ID string `json:"id"` }
+	if err := decode(raw2, &quotes); err != nil {
+		return nil, err
+	}
+	result := make(map[string]bool)
+	for _, q := range quotes {
+		if quoteIDs[q.ID] {
+			result[q.ID] = true
+		}
+	}
+	return result, nil
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // DASHBOARD STATS
 // ─────────────────────────────────────────────────────────────────────────────
 
