@@ -147,6 +147,9 @@ func (h *Handler) GetUnreadMessages(w http.ResponseWriter, r *http.Request) {
 		h.err(w, http.StatusInternalServerError, "failed to load unread messages")
 		return
 	}
+	if msgs == nil {
+		msgs = []models.UnreadClientMessage{}
+	}
 	h.ok(w, msgs)
 }
 
