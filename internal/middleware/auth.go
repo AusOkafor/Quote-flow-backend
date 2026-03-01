@@ -2,6 +2,8 @@ package middleware
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"net/http"
 	"strings"
 	"time"
@@ -10,6 +12,7 @@ import (
 	"github.com/lestrrat-go/jwx/v2/jwt"
 	"quoteflow-backend/config"
 	"quoteflow-backend/internal/models"
+	"quoteflow-backend/internal/repository"
 )
 
 type contextKey string
@@ -42,47 +45,55 @@ func NewJWTVerifier(cfg *config.Config) (*JWTVerifier, error) {
 	return &JWTVerifier{cache: cache, jwksURL: jwksURL}, nil
 }
 
-// RequireAuth verifies the JWT using JWKS and injects *models.User into context.
-func RequireAuth(v *JWTVerifier) func(http.Handler) http.Handler {
+// RequireAuth verifies JWT or X-API-Key and injects *models.User into context.
+// If Bearer token is missing or invalid, tries X-API-Key header (Business plan).
+func RequireAuth(v *JWTVerifier, db *repository.DB) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			tokenStr := extractToken(r)
-			if tokenStr == "" {
-				jsonErr(w, http.StatusUnauthorized, "missing authentication token")
-				return
+			apiKey := strings.TrimSpace(r.Header.Get("X-API-Key"))
+
+			// Try JWT first
+			if tokenStr != "" {
+				keySet, err := v.cache.Get(r.Context(), v.jwksURL)
+				if err != nil {
+					jsonErr(w, http.StatusInternalServerError, "failed to get signing keys")
+					return
+				}
+
+				token, err := jwt.Parse([]byte(tokenStr), jwt.WithKeySet(keySet))
+				if err == nil && !token.Expiration().Before(time.Now()) {
+					userID := token.Subject()
+					email, _ := token.Get("email")
+					emailStr, _ := email.(string)
+					if userID != "" {
+						ctx := context.WithValue(r.Context(), UserContextKey, &models.User{
+							ID:    userID,
+							Email: emailStr,
+						})
+						next.ServeHTTP(w, r.WithContext(ctx))
+						return
+					}
+				}
 			}
 
-			keySet, err := v.cache.Get(r.Context(), v.jwksURL)
-			if err != nil {
-				jsonErr(w, http.StatusInternalServerError, "failed to get signing keys")
-				return
+			// Fallback: X-API-Key
+			if apiKey != "" && db != nil {
+				hash := sha256.Sum256([]byte(apiKey))
+				keyHash := hex.EncodeToString(hash[:])
+				key, err := db.GetAPIKeyByHash(r.Context(), keyHash)
+				if err == nil && key != nil {
+					_ = db.UpdateAPIKeyLastUsed(r.Context(), key.ID)
+					ctx := context.WithValue(r.Context(), UserContextKey, &models.User{
+						ID:    key.UserID,
+						Email: "",
+					})
+					next.ServeHTTP(w, r.WithContext(ctx))
+					return
+				}
 			}
 
-			token, err := jwt.Parse([]byte(tokenStr), jwt.WithKeySet(keySet))
-			if err != nil {
-				jsonErr(w, http.StatusUnauthorized, "invalid or expired token")
-				return
-			}
-
-			if token.Expiration().Before(time.Now()) {
-				jsonErr(w, http.StatusUnauthorized, "token has expired")
-				return
-			}
-
-			userID := token.Subject()
-			email, _ := token.Get("email")
-			emailStr, _ := email.(string)
-
-			if userID == "" {
-				jsonErr(w, http.StatusUnauthorized, "invalid token: missing sub claim")
-				return
-			}
-
-			ctx := context.WithValue(r.Context(), UserContextKey, &models.User{
-				ID:    userID,
-				Email: emailStr,
-			})
-			next.ServeHTTP(w, r.WithContext(ctx))
+			jsonErr(w, http.StatusUnauthorized, "missing or invalid authentication")
 		})
 	}
 }

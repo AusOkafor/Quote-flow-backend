@@ -2,6 +2,9 @@ package handlers
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -153,6 +156,260 @@ func (h *Handler) GetUnreadMessages(w http.ResponseWriter, r *http.Request) {
 	h.ok(w, msgs)
 }
 
+// POST /internal/cron/reminders — sends client reminders and freelancer expiring notifications.
+// Protected by CRON_SECRET. Invoke via external cron (Render, GitHub Actions, etc.).
+func (h *Handler) CronReminders(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	sent := 0
+	errs := []string{}
+
+	// 1. Client reminders (send_reminder=true, expires in 3 days)
+	clientQuotes, err := h.db.GetQuotesNeedingClientReminder(ctx)
+	if err != nil {
+		h.err(w, http.StatusInternalServerError, "failed to load quotes for reminders")
+		return
+	}
+	for _, quote := range clientQuotes {
+		profile, _ := h.db.GetProfile(ctx, quote.UserID)
+		senderName := "QuoteFlow"
+		if profile != nil && profile.BusinessName != "" {
+			senderName = profile.BusinessName
+		}
+		if err := h.notif.SendExpiryReminderToClient(&quote, senderName); err != nil {
+			errs = append(errs, fmt.Sprintf("client reminder %s: %v", quote.QuoteNumber, err))
+			continue
+		}
+		_ = h.db.MarkReminderSent(ctx, quote.ID)
+		sent++
+	}
+
+	// 2. Freelancer expiring notifications (notify_expiring=true, no expiring event yet)
+	freelancerQuotes, err := h.db.GetQuotesNeedingFreelancerExpiringNotification(ctx)
+	if err != nil {
+		h.err(w, http.StatusInternalServerError, "failed to load quotes for expiring notifications")
+		return
+	}
+	for _, quote := range freelancerQuotes {
+		profile, _ := h.db.GetProfile(ctx, quote.UserID)
+		email := ""
+		if profile != nil && profile.EmailOnQuote != "" {
+			email = profile.EmailOnQuote
+		}
+		if email == "" {
+			// Fallback: we don't have user email in quote; would need auth.users lookup
+			continue
+		}
+		if err := h.notif.SendExpiringSoonToFreelancer(&quote, email); err != nil {
+			errs = append(errs, fmt.Sprintf("freelancer expiring %s: %v", quote.QuoteNumber, err))
+			continue
+		}
+		_ = h.db.LogEvent(ctx, quote.UserID, quote.ID, "expiring",
+			fmt.Sprintf("Quote %s expires in 3 days", quote.QuoteNumber))
+		sent++
+	}
+
+	h.ok(w, map[string]interface{}{
+		"sent":   sent,
+		"errors": errs,
+	})
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TEAMS (Business plan)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// GET /teams — returns current user's team
+func (h *Handler) GetMyTeam(w http.ResponseWriter, r *http.Request) {
+	user := currentUser(r)
+	team, err := h.db.GetTeamByUserID(r.Context(), user.ID)
+	if err != nil || team == nil {
+		h.ok(w, nil)
+		return
+	}
+	h.ok(w, team)
+}
+
+// GET /teams/:id/members
+func (h *Handler) ListTeamMembers(w http.ResponseWriter, r *http.Request) {
+	user := currentUser(r)
+	id := chi.URLParam(r, "id")
+	ok, _ := h.db.IsTeamMember(r.Context(), id, user.ID)
+	if !ok {
+		h.err(w, http.StatusForbidden, "not a team member")
+		return
+	}
+	members, err := h.db.ListTeamMembers(r.Context(), id)
+	if err != nil {
+		h.err(w, http.StatusInternalServerError, "failed to load members")
+		return
+	}
+	h.ok(w, members)
+}
+
+// POST /teams/:id/members — invite by email (Business only, max 5)
+func (h *Handler) AddTeamMember(w http.ResponseWriter, r *http.Request) {
+	user := currentUser(r)
+	id := chi.URLParam(r, "id")
+	profile, _ := h.db.GetProfile(r.Context(), user.ID)
+	if profile == nil || profile.Plan != "business" {
+		h.json(w, http.StatusPaymentRequired, models.APIResponse{
+			Success: false,
+			Error:   "business_required",
+			Message: "Team members require a Business plan.",
+		})
+		return
+	}
+	ok, _ := h.db.IsTeamMember(r.Context(), id, user.ID)
+	if !ok {
+		h.err(w, http.StatusForbidden, "not a team member")
+		return
+	}
+	count, _ := h.db.CountTeamMembers(r.Context(), id)
+	if count >= 5 {
+		h.err(w, http.StatusBadRequest, "team limit reached (max 5 members)")
+		return
+	}
+	var req struct {
+		Email string `json:"email"`
+		Role  string `json:"role"`
+	}
+	if err := h.decode(r, &req); err != nil || req.Email == "" {
+		h.err(w, http.StatusBadRequest, "email required")
+		return
+	}
+	inviteeID, err := h.auth.GetUserIDByEmail(strings.TrimSpace(req.Email))
+	if err != nil || inviteeID == "" {
+		h.err(w, http.StatusNotFound, "user not found with that email")
+		return
+	}
+	if inviteeID == user.ID {
+		h.err(w, http.StatusBadRequest, "cannot add yourself")
+		return
+	}
+	role := "member"
+	if req.Role == "admin" {
+		role = "admin"
+	}
+	if err := h.db.AddTeamMember(r.Context(), id, inviteeID, role); err != nil {
+		if strings.Contains(err.Error(), "duplicate") || strings.Contains(err.Error(), "unique") {
+			h.err(w, http.StatusConflict, "user already in team")
+			return
+		}
+		h.err(w, http.StatusInternalServerError, "failed to add member")
+		return
+	}
+	members, _ := h.db.ListTeamMembers(r.Context(), id)
+	h.ok(w, members)
+}
+
+// DELETE /teams/:id/members/:userId
+func (h *Handler) RemoveTeamMember(w http.ResponseWriter, r *http.Request) {
+	user := currentUser(r)
+	id := chi.URLParam(r, "id")
+	targetID := chi.URLParam(r, "userId")
+	ok, _ := h.db.IsTeamMember(r.Context(), id, user.ID)
+	if !ok {
+		h.err(w, http.StatusForbidden, "not a team member")
+		return
+	}
+	if targetID == user.ID {
+		h.err(w, http.StatusBadRequest, "cannot remove yourself — transfer ownership first")
+		return
+	}
+	if err := h.db.RemoveTeamMember(r.Context(), id, targetID); err != nil {
+		h.err(w, http.StatusInternalServerError, "failed to remove member")
+		return
+	}
+	h.ok(w, map[string]bool{"deleted": true})
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// API KEYS (Business plan)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// GET /api-keys
+func (h *Handler) ListAPIKeys(w http.ResponseWriter, r *http.Request) {
+	user := currentUser(r)
+	profile, _ := h.db.GetProfile(r.Context(), user.ID)
+	if profile == nil || profile.Plan != "business" {
+		h.json(w, http.StatusPaymentRequired, models.APIResponse{
+			Success: false,
+			Error:   "business_required",
+			Message: "API keys require a Business plan.",
+		})
+		return
+	}
+	keys, err := h.db.ListAPIKeys(r.Context(), user.ID)
+	if err != nil {
+		h.err(w, http.StatusInternalServerError, "failed to load API keys")
+		return
+	}
+	h.ok(w, keys)
+}
+
+// POST /api-keys
+func (h *Handler) CreateAPIKey(w http.ResponseWriter, r *http.Request) {
+	user := currentUser(r)
+	profile, _ := h.db.GetProfile(r.Context(), user.ID)
+	if profile == nil || profile.Plan != "business" {
+		h.json(w, http.StatusPaymentRequired, models.APIResponse{
+			Success: false,
+			Error:   "business_required",
+			Message: "API keys require a Business plan.",
+		})
+		return
+	}
+	var req models.CreateAPIKeyRequest
+	if err := h.decode(r, &req); err != nil {
+		h.err(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if err := h.validateRequest(&req); err != nil {
+		h.err(w, http.StatusBadRequest, validationErrorMsg(err))
+		return
+	}
+	// Generate key: qf_live_ + 32 random bytes (hex)
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		h.err(w, http.StatusInternalServerError, "failed to generate key")
+		return
+	}
+	rawKey := "qf_live_" + hex.EncodeToString(b)
+	hash := sha256.Sum256([]byte(rawKey))
+	keyHash := hex.EncodeToString(hash[:])
+	created, err := h.db.CreateAPIKey(r.Context(), user.ID, req.Name, keyHash)
+	if err != nil {
+		h.err(w, http.StatusInternalServerError, "failed to create API key")
+		return
+	}
+	h.created(w, models.CreateAPIKeyResponse{
+		ID:        created.ID,
+		Name:      created.Name,
+		Key:       rawKey,
+		CreatedAt: created.CreatedAt,
+	})
+}
+
+// DELETE /api-keys/:id
+func (h *Handler) DeleteAPIKey(w http.ResponseWriter, r *http.Request) {
+	user := currentUser(r)
+	profile, _ := h.db.GetProfile(r.Context(), user.ID)
+	if profile == nil || profile.Plan != "business" {
+		h.json(w, http.StatusPaymentRequired, models.APIResponse{
+			Success: false,
+			Error:   "business_required",
+			Message: "API keys require a Business plan.",
+		})
+		return
+	}
+	id := chi.URLParam(r, "id")
+	if err := h.db.DeleteAPIKey(r.Context(), id, user.ID); err != nil {
+		h.err(w, http.StatusInternalServerError, "failed to revoke API key")
+		return
+	}
+	h.ok(w, map[string]bool{"deleted": true})
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // PROFILE / SETTINGS
 // ─────────────────────────────────────────────────────────────────────────────
@@ -178,6 +435,32 @@ func (h *Handler) UpdateProfile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.UserID = user.ID
+
+	// Pro gating: logo and brand color require Pro plan
+	profile, _ := h.db.GetProfile(r.Context(), user.ID)
+	isPro := profile != nil && (profile.Plan == "pro" || profile.Plan == "business") || h.cfg.IsDevBypassUser(user.ID)
+	if !isPro {
+		curLogo, curBrand := "", ""
+		if profile != nil {
+			if profile.LogoURL != nil {
+				curLogo = *profile.LogoURL
+			}
+			curBrand = profile.BrandColor
+		}
+		newLogo := ""
+		if req.LogoURL != nil {
+			newLogo = *req.LogoURL
+		}
+		if (req.LogoURL != nil && newLogo != curLogo) || (req.BrandColor != "" && req.BrandColor != curBrand) {
+			h.json(w, http.StatusPaymentRequired, models.APIResponse{
+				Success: false,
+				Error:   "pro_required",
+				Message: "Custom branding (logo, brand color) requires a Pro plan. Upgrade to unlock.",
+			})
+			return
+		}
+	}
+
 	if err := h.db.UpsertProfile(r.Context(), &req); err != nil {
 		msg := "failed to save profile"
 		if h.cfg.IsDevelopment() {
@@ -228,8 +511,10 @@ func (h *Handler) CreateClient(w http.ResponseWriter, r *http.Request) {
 		h.err(w, http.StatusBadRequest, validationErrorMsg(err))
 		return
 	}
+	profile, _ := h.db.GetProfile(r.Context(), user.ID)
 	client := &models.Client{
 		UserID:  user.ID,
+		TeamID:  profile.TeamID,
 		Name:    strings.TrimSpace(req.Name),
 		Company: strings.TrimSpace(req.Company),
 		Email:   strings.TrimSpace(req.Email),
@@ -354,7 +639,7 @@ func (h *Handler) CreateQuote(w http.ResponseWriter, r *http.Request) {
 	// Free tier enforcement: max 3 quotes/month for non-Pro users
 	// Dev bypass: in development, DEV_BYPASS_USER_ID gets unlimited access
 	profile, _ := h.db.GetProfile(r.Context(), user.ID)
-	isPro := profile != nil && profile.Plan == "pro" || h.cfg.IsDevBypassUser(user.ID)
+	isPro := profile != nil && (profile.Plan == "pro" || profile.Plan == "business") || h.cfg.IsDevBypassUser(user.ID)
 	if !isPro {
 		count, err := h.db.CountQuotesThisMonth(r.Context(), user.ID)
 		if err == nil && count >= 3 {
@@ -362,6 +647,15 @@ func (h *Handler) CreateQuote(w http.ResponseWriter, r *http.Request) {
 				Success: false,
 				Error:   "free_tier_limit",
 				Message: "You've reached the free tier limit of 3 quotes per month. Upgrade to Pro for unlimited quotes.",
+			})
+			return
+		}
+		// Pro gating: track_views requires Pro
+		if req.TrackViews {
+			h.json(w, http.StatusPaymentRequired, models.APIResponse{
+				Success: false,
+				Error:   "pro_required",
+				Message: "View tracking requires a Pro plan. Upgrade to unlock.",
 			})
 			return
 		}
@@ -377,6 +671,7 @@ func (h *Handler) CreateQuote(w http.ResponseWriter, r *http.Request) {
 	quote := &models.Quote{
 		UserID:           user.ID,
 		ClientID:         req.ClientID,
+		TeamID:           profile.TeamID,
 		QuoteNumber:      quoteNum,
 		Title:            req.Title,
 		Status:           models.StatusDraft,
@@ -436,6 +731,18 @@ func (h *Handler) UpdateQuote(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Pro gating: track_views requires Pro
+	profile, _ := h.db.GetProfile(r.Context(), user.ID)
+	isPro := profile != nil && (profile.Plan == "pro" || profile.Plan == "business") || h.cfg.IsDevBypassUser(user.ID)
+	if !isPro && req.TrackViews != nil && *req.TrackViews {
+		h.json(w, http.StatusPaymentRequired, models.APIResponse{
+			Success: false,
+			Error:   "pro_required",
+			Message: "View tracking requires a Pro plan. Upgrade to unlock.",
+		})
+		return
+	}
+
 	updated, err := h.db.UpdateQuote(r.Context(), id, user.ID, &req)
 	if err != nil {
 		h.err(w, http.StatusInternalServerError, "failed to update quote")
@@ -484,7 +791,8 @@ func (h *Handler) SendQuote(w http.ResponseWriter, r *http.Request) {
 		if recipient == "" {
 			recipient = quote.Client.Email
 		}
-		if err := h.notif.SendQuoteByEmail(quote, recipient, senderName); err != nil {
+		whiteLabel := profile != nil && profile.Plan == "business"
+		if err := h.notif.SendQuoteByEmail(quote, recipient, senderName, whiteLabel); err != nil {
 			h.err(w, http.StatusInternalServerError, "failed to send email: "+err.Error())
 			return
 		}
@@ -531,7 +839,7 @@ func (h *Handler) DuplicateQuote(w http.ResponseWriter, r *http.Request) {
 
 	// Free tier enforcement: same limit as CreateQuote
 	profile, _ := h.db.GetProfile(r.Context(), user.ID)
-	isPro := profile != nil && profile.Plan == "pro" || h.cfg.IsDevBypassUser(user.ID)
+	isPro := profile != nil && (profile.Plan == "pro" || profile.Plan == "business") || h.cfg.IsDevBypassUser(user.ID)
 	if !isPro {
 		count, err := h.db.CountQuotesThisMonth(r.Context(), user.ID)
 		if err == nil && count >= 3 {
@@ -539,6 +847,16 @@ func (h *Handler) DuplicateQuote(w http.ResponseWriter, r *http.Request) {
 				Success: false,
 				Error:   "free_tier_limit",
 				Message: "You've reached the free tier limit of 3 quotes per month. Upgrade to Pro for unlimited quotes.",
+			})
+			return
+		}
+		// Pro gating: cannot duplicate quote with track_views on free plan
+		source, _ := h.db.GetQuote(r.Context(), id, user.ID)
+		if source != nil && source.TrackViews {
+			h.json(w, http.StatusPaymentRequired, models.APIResponse{
+				Success: false,
+				Error:   "pro_required",
+				Message: "View tracking requires a Pro plan. Upgrade to duplicate quotes with view tracking.",
 			})
 			return
 		}
@@ -612,16 +930,22 @@ func (h *Handler) PublicGetQuote(w http.ResponseWriter, r *http.Request) {
 	// Include creator profile (logo, business name) for display on public quote
 	profile, _ := h.db.GetProfile(r.Context(), quote.UserID)
 	type creatorInfo struct {
-		LogoURL     *string `json:"logo_url,omitempty"`
+		LogoURL      *string `json:"logo_url,omitempty"`
 		BusinessName string  `json:"business_name,omitempty"`
-		BrandColor  string  `json:"brand_color,omitempty"`
+		BrandColor   string  `json:"brand_color,omitempty"`
+		WhiteLabel   bool    `json:"white_label,omitempty"` // Business plan: no QuoteFlow fallback
 	}
 	out := struct {
 		models.QuoteWithDetails
 		Creator *creatorInfo `json:"creator,omitempty"`
 	}{QuoteWithDetails: *quote}
 	if profile != nil {
-		out.Creator = &creatorInfo{LogoURL: profile.LogoURL, BusinessName: profile.BusinessName, BrandColor: profile.BrandColor}
+		out.Creator = &creatorInfo{
+			LogoURL:      profile.LogoURL,
+			BusinessName: profile.BusinessName,
+			BrandColor:   profile.BrandColor,
+			WhiteLabel:   profile.Plan == "business",
+		}
 	}
 	h.ok(w, &out)
 }

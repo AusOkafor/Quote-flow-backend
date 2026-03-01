@@ -43,6 +43,9 @@ type Config struct {
 
 	// Dev only: user ID that bypasses free tier limits (unlimited quotes, etc.)
 	DevBypassUserID string
+
+	// Cron: secret for internal cron endpoints (e.g. reminders)
+	CronSecret string
 }
 
 // Load reads .env file (if present) and populates Config from environment variables.
@@ -68,6 +71,7 @@ func Load() (*Config, error) {
 		FrontendURL:             getEnv("FRONTEND_URL", "https://quote-flow-phi.vercel.app"),
 		QuoteLinkBaseURL:        getEnv("QUOTE_LINK_BASE_URL", "https://quote-flow-phi.vercel.app/q"),
 		DevBypassUserID:         getEnv("DEV_BYPASS_USER_ID", "4946c101-f0e4-4c6d-a094-012a6ff7775a"),
+		CronSecret:              getEnv("CRON_SECRET", ""),
 	}
 
 	// Parse comma-separated allowed origins

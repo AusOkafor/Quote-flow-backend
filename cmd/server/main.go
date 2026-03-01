@@ -59,7 +59,7 @@ func main() {
 	r.Use(cors.Handler(cors.Options{
 		AllowedOrigins:   cfg.AllowedOrigins,
 		AllowedMethods:   []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
-		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-Request-ID"},
+		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-Request-ID", "X-API-Key"},
 		ExposedHeaders:   []string{"Content-Disposition", "Content-Length"},
 		AllowCredentials: true,
 		MaxAge:           300,
@@ -68,6 +68,12 @@ func main() {
 	// ── Public routes (no auth) ───────────────────────────────
 
 	r.Get("/health", h.HealthCheck)
+
+	// Internal cron (CRON_SECRET auth)
+	r.Route("/internal/cron", func(r chi.Router) {
+		r.Use(middleware.RequireCronSecret(cfg))
+		r.Post("/reminders", h.CronReminders)
+	})
 
 	// Public quote viewer — clients open these from WhatsApp/email links
 	r.Route("/q/{token}", func(r chi.Router) {
@@ -81,7 +87,7 @@ func main() {
 	// ── Protected routes (JWT required) ──────────────────────
 	r.Group(func(r chi.Router) {
 		r.Use(apiLimiter.Limit)
-		r.Use(middleware.RequireAuth(jwtVerifier))
+		r.Use(middleware.RequireAuth(jwtVerifier, db))
 
 		// Auth
 		r.Get("/auth/me", h.GetMe)
@@ -94,6 +100,17 @@ func main() {
 		// Profile / settings
 		r.Get("/profile", h.GetProfile)
 		r.Put("/profile", h.UpdateProfile)
+
+		// Teams (Business plan)
+		r.Get("/teams", h.GetMyTeam)
+		r.Get("/teams/{id}/members", h.ListTeamMembers)
+		r.Post("/teams/{id}/members", h.AddTeamMember)
+		r.Delete("/teams/{id}/members/{userId}", h.RemoveTeamMember)
+
+		// API keys (Business plan)
+		r.Get("/api-keys", h.ListAPIKeys)
+		r.Post("/api-keys", h.CreateAPIKey)
+		r.Delete("/api-keys/{id}", h.DeleteAPIKey)
 
 		// Templates
 		r.Get("/templates", h.ListTemplates)

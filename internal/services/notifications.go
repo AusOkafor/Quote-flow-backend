@@ -71,7 +71,7 @@ func (n *NotificationService) sendEmail(to, subject, html string) error {
 }
 
 // SendQuoteByEmail sends the quote link to the specified recipient (or falls back to client email).
-func (n *NotificationService) SendQuoteByEmail(quote *models.QuoteWithDetails, recipientEmail, senderName string) error {
+func (n *NotificationService) SendQuoteByEmail(quote *models.QuoteWithDetails, recipientEmail, senderName string, whiteLabel bool) error {
 	quoteURL := fmt.Sprintf("%s/%s", n.cfg.QuoteLinkBaseURL, quote.ShareToken)
 	expiryStr := quote.ExpiresAt.Format("January 2, 2006")
 
@@ -83,7 +83,7 @@ func (n *NotificationService) SendQuoteByEmail(quote *models.QuoteWithDetails, r
 		Total:       fmt.Sprintf("%s %.2f", quote.Currency, quote.Total),
 		QuoteURL:    quoteURL,
 		ExpiresAt:   expiryStr,
-	})
+	}, whiteLabel)
 
 	to := recipientEmail
 	if to == "" {
@@ -155,6 +155,46 @@ func (n *NotificationService) SendChangeRequestNotification(quote *models.Quote,
 	</div>`, displayName, quote.QuoteNumber, html.EscapeString(requestMessage), n.cfg.AppURL)
 
 	subject := fmt.Sprintf("✏️ %s requested changes to quote %s", displayName, quote.QuoteNumber)
+	return n.sendEmail(freelancerEmail, subject, html)
+}
+
+// SendExpiryReminderToClient sends a reminder to the client that their quote expires in 3 days.
+func (n *NotificationService) SendExpiryReminderToClient(quote *models.QuoteWithDetails, senderName string) error {
+	to := quote.Client.Email
+	if to == "" {
+		return fmt.Errorf("client has no email")
+	}
+	quoteURL := fmt.Sprintf("%s/%s", n.cfg.QuoteLinkBaseURL, quote.ShareToken)
+	expiryStr := quote.ExpiresAt.Format("January 2, 2006")
+	html := fmt.Sprintf(`
+	<div style="font-family:sans-serif;max-width:560px;margin:0 auto;padding:32px;">
+	  <h2 style="color:#C9A84C;margin-bottom:8px;">⏰ Quote Expiring Soon</h2>
+	  <p style="color:#555;font-size:15px;line-height:1.6;">
+	    Hi %s, your quote <strong>%s</strong> from <strong>%s</strong> expires on <strong>%s</strong>.
+	  </p>
+	  <p style="color:#555;font-size:14px;">Total: <strong>%s %.2f</strong></p>
+	  <a href="%s" style="display:inline-block;margin-top:20px;background:#2DAB6F;color:#fff;padding:13px 28px;border-radius:8px;text-decoration:none;font-weight:600;">
+	    View &amp; Accept Quote →
+	  </a>
+	</div>`, quote.Client.Name, quote.QuoteNumber, senderName, expiryStr, quote.Currency, quote.Total, quoteURL)
+	subject := fmt.Sprintf("⏰ Quote %s expires soon — %s", quote.QuoteNumber, quote.Title)
+	return n.sendEmail(to, subject, html)
+}
+
+// SendExpiringSoonToFreelancer notifies the freelancer that a quote is expiring in 3 days.
+func (n *NotificationService) SendExpiringSoonToFreelancer(quote *models.QuoteWithDetails, freelancerEmail string) error {
+	html := fmt.Sprintf(`
+	<div style="font-family:sans-serif;max-width:560px;margin:0 auto;padding:32px;">
+	  <h2 style="color:#C9A84C;margin-bottom:8px;">⏰ Quote Expiring Soon</h2>
+	  <p style="color:#555;font-size:15px;line-height:1.6;">
+	    Your quote <strong>%s</strong> for <strong>%s</strong> expires in 3 days.
+	  </p>
+	  <p style="color:#555;font-size:14px;">Total: <strong>%s %.2f</strong></p>
+	  <a href="%s/app" style="display:inline-block;margin-top:20px;background:#E85C2F;color:#fff;padding:13px 28px;border-radius:8px;text-decoration:none;font-weight:600;">
+	    View in QuoteFlow →
+	  </a>
+	</div>`, quote.QuoteNumber, quote.Client.Name, quote.Currency, quote.Total, n.cfg.AppURL)
+	subject := fmt.Sprintf("⏰ Quote %s expires in 3 days", quote.QuoteNumber)
 	return n.sendEmail(freelancerEmail, subject, html)
 }
 
@@ -239,7 +279,17 @@ type QuoteEmailData struct {
 	ExpiresAt   string
 }
 
-func quoteEmailHTML(d QuoteEmailData) string {
+func quoteEmailHTML(d QuoteEmailData, whiteLabel bool) string {
+	footer := `<tr>
+    <td style="background:#EDE9DF;padding:20px 36px;text-align:center;">
+      <p style="margin:0;font-size:12px;color:#8A8278;">
+        Powered by <strong>QuoteFlow</strong> · Professional quotes for Caribbean freelancers
+      </p>
+    </td>
+  </tr>`
+	if whiteLabel {
+		footer = ""
+	}
 	return fmt.Sprintf(`<!DOCTYPE html>
 <html>
 <head><meta charset="UTF-8"/></head>
@@ -295,13 +345,7 @@ func quoteEmailHTML(d QuoteEmailData) string {
     </td>
   </tr>
   <!-- Footer -->
-  <tr>
-    <td style="background:#EDE9DF;padding:20px 36px;text-align:center;">
-      <p style="margin:0;font-size:12px;color:#8A8278;">
-        Powered by <strong>QuoteFlow</strong> · Professional quotes for Caribbean freelancers
-      </p>
-    </td>
-  </tr>
+  %s
 </table>
 </td></tr>
 </table>
@@ -311,5 +355,6 @@ func quoteEmailHTML(d QuoteEmailData) string {
 		d.QuoteNumber, d.QuoteTitle,
 		d.Total, d.ExpiresAt,
 		d.QuoteURL, d.QuoteURL, d.QuoteURL,
+		footer,
 	)
 }

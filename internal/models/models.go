@@ -43,8 +43,9 @@ type Profile struct {
 	TaxExemptDefault bool      `json:"tax_exempt_default" db:"tax_exempt_default"`
 	ShowTaxBreakdown bool      `json:"show_tax_breakdown" db:"show_tax_breakdown"`
 	// Billing
-	Plan             string `json:"plan" db:"plan"`                           // "free" or "pro"
-	StripeCustomerID string `json:"stripe_customer_id,omitempty" db:"stripe_customer_id"`
+	Plan             string  `json:"plan" db:"plan"` // "free", "pro", or "business"
+	StripeCustomerID string  `json:"stripe_customer_id,omitempty" db:"stripe_customer_id"`
+	TeamID           *string `json:"team_id,omitempty" db:"team_id"`
 	// Notification preferences
 	NotifyAccepted  bool `json:"notify_accepted" db:"notify_accepted"`
 	NotifyViewed    bool `json:"notify_viewed" db:"notify_viewed"`
@@ -55,12 +56,33 @@ type Profile struct {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// TEAM
+// ─────────────────────────────────────────────────────────────────────────────
+
+type Team struct {
+	ID        string    `json:"id" db:"id"`
+	Name      string    `json:"name" db:"name"`
+	CreatedAt time.Time `json:"created_at" db:"created_at"`
+	UpdatedAt time.Time `json:"updated_at" db:"updated_at"`
+}
+
+type TeamMember struct {
+	ID        string    `json:"id" db:"id"`
+	TeamID    string    `json:"team_id" db:"team_id"`
+	UserID    string    `json:"user_id" db:"user_id"`
+	Role      string    `json:"role" db:"role"` // owner, admin, member
+	CreatedAt time.Time `json:"created_at" db:"created_at"`
+	Email     string    `json:"email,omitempty" db:"-"` // joined from auth, not stored
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // CLIENT
 // ─────────────────────────────────────────────────────────────────────────────
 
 type Client struct {
 	ID        string    `json:"id" db:"id"`
 	UserID    string    `json:"user_id" db:"user_id"`
+	TeamID    *string   `json:"team_id,omitempty" db:"team_id"`
 	Name      string    `json:"name" db:"name"`
 	Company   string    `json:"company" db:"company"`
 	Email     string    `json:"email" db:"email"`
@@ -129,13 +151,15 @@ type Quote struct {
 	// Tracking
 	ViewCount       int        `json:"view_count" db:"view_count"`
 	LastViewedAt    *time.Time `json:"last_viewed_at" db:"last_viewed_at"`
+	ReminderSentAt  *time.Time `json:"reminder_sent_at,omitempty" db:"reminder_sent_at"`
 	AcceptedAt      *time.Time `json:"accepted_at" db:"accepted_at"`
 	AcceptedByName  string     `json:"accepted_by_name,omitempty" db:"accepted_by_name"`
 	PaidAt          *time.Time `json:"paid_at,omitempty" db:"paid_at"`
 	SentAt          *time.Time `json:"sent_at" db:"sent_at"`
 	// Share
-	ShareToken string `json:"share_token" db:"share_token"` // unique token for public link
-	CreatedAt  time.Time  `json:"created_at" db:"created_at"`
+	ShareToken string   `json:"share_token" db:"share_token"` // unique token for public link
+	TeamID     *string  `json:"team_id,omitempty" db:"team_id"`
+	CreatedAt  time.Time `json:"created_at" db:"created_at"`
 	UpdatedAt  time.Time  `json:"updated_at" db:"updated_at"`
 
 	// Joined fields
@@ -359,6 +383,31 @@ type UnreadClientMessage struct {
 	Message       string    `json:"message"`
 	NoteType      string    `json:"note_type"`      // message | change_request
 	CreatedAt     time.Time `json:"created_at"`
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// API KEYS (Business plan)
+// ─────────────────────────────────────────────────────────────────────────────
+
+type APIKey struct {
+	ID         string     `json:"id" db:"id"`
+	UserID     string     `json:"user_id" db:"user_id"`
+	Name       string     `json:"name" db:"name"`
+	LastUsedAt *time.Time `json:"last_used_at,omitempty" db:"last_used_at"`
+	CreatedAt  time.Time  `json:"created_at" db:"created_at"`
+}
+
+// CreateAPIKeyRequest — POST /api-keys
+type CreateAPIKeyRequest struct {
+	Name string `json:"name" validate:"required,min=1,max=100"`
+}
+
+// CreateAPIKeyResponse — raw key returned once on create
+type CreateAPIKeyResponse struct {
+	ID        string    `json:"id"`
+	Name      string    `json:"name"`
+	Key       string    `json:"key"` // qf_live_xxx — only shown once
+	CreatedAt time.Time `json:"created_at"`
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

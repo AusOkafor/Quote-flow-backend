@@ -46,6 +46,15 @@ func defaultIfEmpty(s, def string) string {
 	return s
 }
 
+// userOrTeamFilter returns (teamID, "") if user has team, else ("", userID) for filtering.
+func (db *DB) userOrTeamFilter(ctx context.Context, userID string) (teamID, uid string) {
+	profile, _ := db.GetProfile(ctx, userID)
+	if profile != nil && profile.TeamID != nil && *profile.TeamID != "" {
+		return *profile.TeamID, ""
+	}
+	return "", userID
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // PROFILE
 // ─────────────────────────────────────────────────────────────────────────────
@@ -102,6 +111,9 @@ func (db *DB) UpsertProfile(ctx context.Context, p *models.Profile) error {
 	if p.StripeCustomerID != "" {
 		row["stripe_customer_id"] = p.StripeCustomerID
 	}
+	if p.TeamID != nil {
+		row["team_id"] = *p.TeamID
+	}
 	raw, _, err := db.client.From("profiles").
 		Upsert(row, "user_id", "representation", "").
 		Execute()
@@ -123,11 +135,14 @@ func (db *DB) UpsertProfile(ctx context.Context, p *models.Profile) error {
 // ─────────────────────────────────────────────────────────────────────────────
 
 func (db *DB) ListClients(ctx context.Context, userID string) ([]models.Client, error) {
-	// Use the client_summary view to get stats in one query
-	raw, _, err := db.client.From("client_summary").
-		Select("*", "exact", false).
-		Eq("user_id", userID).
-		Order("created_at", &postgrest.OrderOpts{Ascending: false}).
+	profile, _ := db.GetProfile(ctx, userID)
+	q := db.client.From("client_summary").Select("*", "exact", false)
+	if profile != nil && profile.TeamID != nil && *profile.TeamID != "" {
+		q = q.Eq("team_id", *profile.TeamID)
+	} else {
+		q = q.Eq("user_id", userID)
+	}
+	raw, _, err := q.Order("created_at", &postgrest.OrderOpts{Ascending: false}).
 		Execute()
 	if err != nil {
 		return nil, fmt.Errorf("list clients: %w", err)
@@ -140,11 +155,14 @@ func (db *DB) ListClients(ctx context.Context, userID string) ([]models.Client, 
 }
 
 func (db *DB) GetClient(ctx context.Context, id, userID string) (*models.Client, error) {
-	raw, _, err := db.client.From("client_summary").
-		Select("*", "exact", false).
-		Eq("id", id).
-		Eq("user_id", userID).
-		Single().
+	profile, _ := db.GetProfile(ctx, userID)
+	q := db.client.From("client_summary").Select("*", "exact", false).Eq("id", id)
+	if profile != nil && profile.TeamID != nil && *profile.TeamID != "" {
+		q = q.Eq("team_id", *profile.TeamID)
+	} else {
+		q = q.Eq("user_id", userID)
+	}
+	raw, _, err := q.Single().
 		Execute()
 	if err != nil {
 		return nil, fmt.Errorf("get client: %w", err)
@@ -157,7 +175,6 @@ func (db *DB) CreateClient(ctx context.Context, c *models.Client) error {
 	now := time.Now()
 	c.CreatedAt = now
 	c.UpdatedAt = now
-	// Use map to avoid sending empty ID (PostgreSQL rejects "" for UUID)
 	row := map[string]interface{}{
 		"user_id":    c.UserID,
 		"name":       c.Name,
@@ -168,6 +185,9 @@ func (db *DB) CreateClient(ctx context.Context, c *models.Client) error {
 		"notes":      c.Notes,
 		"created_at": now,
 		"updated_at": now,
+	}
+	if c.TeamID != nil && *c.TeamID != "" {
+		row["team_id"] = *c.TeamID
 	}
 	raw, _, err := db.client.From("clients").
 		Insert(row, false, "", "representation", "").
@@ -187,20 +207,25 @@ func (db *DB) CreateClient(ctx context.Context, c *models.Client) error {
 
 func (db *DB) UpdateClient(ctx context.Context, c *models.Client) error {
 	c.UpdatedAt = time.Now()
-	_, _, err := db.client.From("clients").
-		Update(c, "*", "").
-		Eq("id", c.ID).
-		Eq("user_id", c.UserID).
-		Execute()
+	q := db.client.From("clients").Update(c, "*", "").Eq("id", c.ID)
+	if c.TeamID != nil && *c.TeamID != "" {
+		q = q.Eq("team_id", *c.TeamID)
+	} else {
+		q = q.Eq("user_id", c.UserID)
+	}
+	_, _, err := q.Execute()
 	return err
 }
 
 func (db *DB) DeleteClient(ctx context.Context, id, userID string) error {
-	_, _, err := db.client.From("clients").
-		Delete("*", "").
-		Eq("id", id).
-		Eq("user_id", userID).
-		Execute()
+	profile, _ := db.GetProfile(ctx, userID)
+	q := db.client.From("clients").Delete("*", "").Eq("id", id)
+	if profile != nil && profile.TeamID != nil && *profile.TeamID != "" {
+		q = q.Eq("team_id", *profile.TeamID)
+	} else {
+		q = q.Eq("user_id", userID)
+	}
+	_, _, err := q.Execute()
 	return err
 }
 
@@ -209,10 +234,14 @@ func (db *DB) DeleteClient(ctx context.Context, id, userID string) error {
 // ─────────────────────────────────────────────────────────────────────────────
 
 func (db *DB) ListQuotes(ctx context.Context, userID string, statusFilter string, currencyFilter string) ([]models.Quote, error) {
-	q := db.client.From("quotes").
-		Select("*,client:clients(*)", "exact", false).
-		Eq("user_id", userID).
-		Order("created_at", &postgrest.OrderOpts{Ascending: false})
+	profile, _ := db.GetProfile(ctx, userID)
+	base := db.client.From("quotes").Select("*,client:clients(*)", "exact", false)
+	if profile != nil && profile.TeamID != nil && *profile.TeamID != "" {
+		base = base.Eq("team_id", *profile.TeamID)
+	} else {
+		base = base.Eq("user_id", userID)
+	}
+	q := base.Order("created_at", &postgrest.OrderOpts{Ascending: false})
 
 	if statusFilter != "" && statusFilter != "all" {
 		q = q.Eq("status", statusFilter)
@@ -231,17 +260,20 @@ func (db *DB) ListQuotes(ctx context.Context, userID string, statusFilter string
 }
 
 func (db *DB) GetQuote(ctx context.Context, id, userID string) (*models.QuoteWithDetails, error) {
-	raw, _, err := db.client.From("quotes").
-		Select("*,client:clients(*),line_items(*)", "exact", false).
-		Eq("id", id).
-		Eq("user_id", userID).
-		Single().
+	profile, _ := db.GetProfile(ctx, userID)
+	query := db.client.From("quotes").Select("*,client:clients(*),line_items(*)", "exact", false).Eq("id", id)
+	if profile != nil && profile.TeamID != nil && *profile.TeamID != "" {
+		query = query.Eq("team_id", *profile.TeamID)
+	} else {
+		query = query.Eq("user_id", userID)
+	}
+	raw, _, err := query.Single().
 		Execute()
 	if err != nil {
 		return nil, fmt.Errorf("get quote: %w", err)
 	}
-	var q models.QuoteWithDetails
-	return &q, decode(raw, &q)
+	var result models.QuoteWithDetails
+	return &result, decode(raw, &result)
 }
 
 // GetQuoteByShareToken loads a quote for the public viewer (no auth required).
@@ -342,6 +374,9 @@ func (db *DB) CreateQuote(ctx context.Context, q *models.Quote, items []models.L
 		"send_reminder":     q.SendReminder,
 		"created_at":        now,
 		"updated_at":        now,
+	}
+	if q.TeamID != nil && *q.TeamID != "" {
+		row["team_id"] = *q.TeamID
 	}
 	raw, _, err := db.client.From("quotes").
 		Insert(row, false, "", "representation", "").
@@ -472,11 +507,14 @@ func (db *DB) UpdateQuote(ctx context.Context, id, userID string, req *models.Up
 		fields["expires_at"] = time.Now().AddDate(0, 0, *req.ValidityDays)
 	}
 
-	_, _, err := db.client.From("quotes").
-		Update(fields, "*", "").
-		Eq("id", id).
-		Eq("user_id", userID).
-		Execute()
+	teamID, uid := db.userOrTeamFilter(ctx, userID)
+	q := db.client.From("quotes").Update(fields, "*", "").Eq("id", id)
+	if teamID != "" {
+		q = q.Eq("team_id", teamID)
+	} else {
+		q = q.Eq("user_id", uid)
+	}
+	_, _, err := q.Execute()
 	if err != nil {
 		return nil, fmt.Errorf("update quote: %w", err)
 	}
@@ -526,12 +564,14 @@ func (db *DB) MarkQuoteAsPaid(ctx context.Context, id, userID string) (*models.Q
 		return quote, nil // already paid
 	}
 	now := time.Now()
-	_, _, err = db.client.From("quotes").
-		Update(map[string]interface{}{"paid_at": now, "updated_at": now}, "*", "").
-		Eq("id", id).
-		Eq("user_id", userID).
-		Eq("status", "accepted").
-		Execute()
+	teamID, uid := db.userOrTeamFilter(ctx, userID)
+	q := db.client.From("quotes").Update(map[string]interface{}{"paid_at": now, "updated_at": now}, "*", "").Eq("id", id).Eq("status", "accepted")
+	if teamID != "" {
+		q = q.Eq("team_id", teamID)
+	} else {
+		q = q.Eq("user_id", uid)
+	}
+	_, _, err = q.Execute()
 	if err != nil {
 		return nil, fmt.Errorf("mark paid: %w", err)
 	}
@@ -551,11 +591,14 @@ func (db *DB) UpdateQuoteStatus(ctx context.Context, id, userID string, status m
 		now := time.Now()
 		update["sent_at"] = now
 	}
-	_, _, err := db.client.From("quotes").
-		Update(update, "*", "").
-		Eq("id", id).
-		Eq("user_id", userID).
-		Execute()
+	teamID, uid := db.userOrTeamFilter(ctx, userID)
+	q := db.client.From("quotes").Update(update, "*", "").Eq("id", id)
+	if teamID != "" {
+		q = q.Eq("team_id", teamID)
+	} else {
+		q = q.Eq("user_id", uid)
+	}
+	_, _, err := q.Execute()
 	return err
 }
 
@@ -576,6 +619,7 @@ func (db *DB) DuplicateQuote(ctx context.Context, id, userID string) (*models.Qu
 	newQuote := models.Quote{
 		UserID:           original.UserID,
 		ClientID:         original.ClientID,
+		TeamID:           original.TeamID,
 		QuoteNumber:      newNum,
 		Title:            original.Title + " (Copy)",
 		Status:           models.StatusDraft,
@@ -641,11 +685,14 @@ func (db *DB) AcceptQuote(ctx context.Context, token string, sigName string) (*m
 }
 
 func (db *DB) DeleteQuote(ctx context.Context, id, userID string) error {
-	_, _, err := db.client.From("quotes").
-		Delete("*", "").
-		Eq("id", id).
-		Eq("user_id", userID).
-		Execute()
+	teamID, uid := db.userOrTeamFilter(ctx, userID)
+	q := db.client.From("quotes").Delete("*", "").Eq("id", id)
+	if teamID != "" {
+		q = q.Eq("team_id", teamID)
+	} else {
+		q = q.Eq("user_id", uid)
+	}
+	_, _, err := q.Execute()
 	return err
 }
 
@@ -1164,4 +1211,261 @@ func (db *DB) GetRecentActivity(ctx context.Context, userID string, limit int) (
 		}
 	}
 	return items, nil
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CRON: REMINDERS & EXPIRING NOTIFICATIONS
+// ─────────────────────────────────────────────────────────────────────────────
+
+// GetQuotesNeedingClientReminder returns sent quotes with send_reminder=true,
+// expires_at in the next 3 days, and reminder_sent_at IS NULL.
+func (db *DB) GetQuotesNeedingClientReminder(ctx context.Context) ([]models.QuoteWithDetails, error) {
+	now := time.Now()
+	windowEnd := now.AddDate(0, 0, 3)
+	raw, _, err := db.client.From("quotes").
+		Select("*,client:clients(*),line_items(*)", "exact", false).
+		Eq("status", "sent").
+		Eq("send_reminder", "true").
+		Is("reminder_sent_at", "null").
+		Gte("expires_at", now.Format(time.RFC3339)).
+		Lte("expires_at", windowEnd.Format(time.RFC3339)).
+		Execute()
+	if err != nil {
+		return nil, err
+	}
+	var quotes []models.QuoteWithDetails
+	if err := decode(raw, &quotes); err != nil {
+		return nil, err
+	}
+	return quotes, nil
+}
+
+// GetQuotesNeedingFreelancerExpiringNotification returns sent quotes expiring in 3 days
+// whose owner has notify_expiring=true and no existing "expiring" event.
+func (db *DB) GetQuotesNeedingFreelancerExpiringNotification(ctx context.Context) ([]models.QuoteWithDetails, error) {
+	now := time.Now()
+	windowEnd := now.AddDate(0, 0, 3)
+	raw, _, err := db.client.From("quotes").
+		Select("*,client:clients(*),line_items(*)", "exact", false).
+		Eq("status", "sent").
+		Gte("expires_at", now.Format(time.RFC3339)).
+		Lte("expires_at", windowEnd.Format(time.RFC3339)).
+		Execute()
+	if err != nil {
+		return nil, err
+	}
+	var quotes []models.QuoteWithDetails
+	if err := decode(raw, &quotes); err != nil {
+		return nil, err
+	}
+	var result []models.QuoteWithDetails
+	for _, q := range quotes {
+		profile, err := db.GetProfile(ctx, q.UserID)
+		if err != nil || profile == nil || !profile.NotifyExpiring {
+			continue
+		}
+		hasExpiring, _ := db.HasExpiringEvent(ctx, q.ID)
+		if hasExpiring {
+			continue
+		}
+		result = append(result, q)
+	}
+	return result, nil
+}
+
+// HasExpiringEvent returns true if quote_events has an "expiring" event for this quote.
+func (db *DB) HasExpiringEvent(ctx context.Context, quoteID string) (bool, error) {
+	raw, _, err := db.client.From("quote_events").
+		Select("id", "exact", false).
+		Eq("quote_id", quoteID).
+		Eq("event_type", "expiring").
+		Limit(1, "").
+		Execute()
+	if err != nil {
+		return false, err
+	}
+	var rows []struct{ ID string `json:"id"` }
+	if err := decode(raw, &rows); err != nil {
+		return false, err
+	}
+	return len(rows) > 0, nil
+}
+
+// MarkReminderSent sets reminder_sent_at on the quote.
+func (db *DB) MarkReminderSent(ctx context.Context, quoteID string) error {
+	now := time.Now()
+	_, _, err := db.client.From("quotes").
+		Update(map[string]interface{}{"reminder_sent_at": now, "updated_at": now}, "*", "").
+		Eq("id", quoteID).
+		Execute()
+	return err
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TEAMS
+// ─────────────────────────────────────────────────────────────────────────────
+
+func (db *DB) GetTeamByUserID(ctx context.Context, userID string) (*models.Team, error) {
+	profile, err := db.GetProfile(ctx, userID)
+	if err != nil || profile == nil || profile.TeamID == nil || *profile.TeamID == "" {
+		return nil, nil
+	}
+	return db.GetTeam(ctx, *profile.TeamID)
+}
+
+func (db *DB) GetTeam(ctx context.Context, teamID string) (*models.Team, error) {
+	raw, _, err := db.client.From("teams").
+		Select("*", "exact", false).
+		Eq("id", teamID).
+		Single().
+		Execute()
+	if err != nil {
+		return nil, err
+	}
+	var t models.Team
+	return &t, decode(raw, &t)
+}
+
+func (db *DB) ListTeamMembers(ctx context.Context, teamID string) ([]models.TeamMember, error) {
+	raw, _, err := db.client.From("team_members").
+		Select("*", "exact", false).
+		Eq("team_id", teamID).
+		Order("created_at", &postgrest.OrderOpts{Ascending: true}).
+		Execute()
+	if err != nil {
+		return nil, err
+	}
+	var members []models.TeamMember
+	return members, decode(raw, &members)
+}
+
+func (db *DB) CountTeamMembers(ctx context.Context, teamID string) (int, error) {
+	raw, _, err := db.client.From("team_members").
+		Select("id", "exact", false).
+		Eq("team_id", teamID).
+		Execute()
+	if err != nil {
+		return 0, err
+	}
+	var rows []struct{ ID string `json:"id"` }
+	if err := decode(raw, &rows); err != nil {
+		return 0, err
+	}
+	return len(rows), nil
+}
+
+func (db *DB) IsTeamMember(ctx context.Context, teamID, userID string) (bool, error) {
+	raw, _, err := db.client.From("team_members").
+		Select("id", "exact", false).
+		Eq("team_id", teamID).
+		Eq("user_id", userID).
+		Limit(1, "").
+		Execute()
+	if err != nil {
+		return false, err
+	}
+	var rows []struct{ ID string `json:"id"` }
+	if err := decode(raw, &rows); err != nil {
+		return false, err
+	}
+	return len(rows) > 0, nil
+}
+
+func (db *DB) AddTeamMember(ctx context.Context, teamID, userID, role string) error {
+	row := map[string]interface{}{
+		"team_id": teamID,
+		"user_id": userID,
+		"role":    role,
+	}
+	_, _, err := db.client.From("team_members").
+		Insert(row, false, "", "representation", "").
+		Execute()
+	return err
+}
+
+func (db *DB) RemoveTeamMember(ctx context.Context, teamID, userID string) error {
+	_, _, err := db.client.From("team_members").
+		Delete("*", "").
+		Eq("team_id", teamID).
+		Eq("user_id", userID).
+		Execute()
+	return err
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// API KEYS (Business plan)
+// ─────────────────────────────────────────────────────────────────────────────
+
+func (db *DB) ListAPIKeys(ctx context.Context, userID string) ([]models.APIKey, error) {
+	raw, _, err := db.client.From("api_keys").
+		Select("*", "exact", false).
+		Eq("user_id", userID).
+		Order("created_at", &postgrest.OrderOpts{Ascending: false}).
+		Execute()
+	if err != nil {
+		return nil, fmt.Errorf("list api keys: %w", err)
+	}
+	var keys []models.APIKey
+	if err := decode(raw, &keys); err != nil {
+		return nil, err
+	}
+	return keys, nil
+}
+
+func (db *DB) GetAPIKeyByHash(ctx context.Context, keyHash string) (*models.APIKey, error) {
+	raw, _, err := db.client.From("api_keys").
+		Select("*", "exact", false).
+		Eq("key_hash", keyHash).
+		Single().
+		Execute()
+	if err != nil {
+		return nil, err
+	}
+	var k models.APIKey
+	if err := decode(raw, &k); err != nil {
+		return nil, err
+	}
+	return &k, nil
+}
+
+func (db *DB) CreateAPIKey(ctx context.Context, userID, name, keyHash string) (*models.APIKey, error) {
+	now := time.Now()
+	row := map[string]interface{}{
+		"user_id":    userID,
+		"name":       name,
+		"key_hash":   keyHash,
+		"created_at": now,
+	}
+	raw, _, err := db.client.From("api_keys").
+		Insert(row, false, "", "representation", "").
+		Execute()
+	if err != nil {
+		return nil, fmt.Errorf("create api key: %w", err)
+	}
+	var results []models.APIKey
+	if err := decode(raw, &results); err != nil {
+		return nil, err
+	}
+	if len(results) == 0 {
+		return nil, fmt.Errorf("no row returned")
+	}
+	return &results[0], nil
+}
+
+func (db *DB) DeleteAPIKey(ctx context.Context, id, userID string) error {
+	_, _, err := db.client.From("api_keys").
+		Delete("*", "").
+		Eq("id", id).
+		Eq("user_id", userID).
+		Execute()
+	return err
+}
+
+func (db *DB) UpdateAPIKeyLastUsed(ctx context.Context, id string) error {
+	now := time.Now()
+	_, _, err := db.client.From("api_keys").
+		Update(map[string]interface{}{"last_used_at": now}, "*", "").
+		Eq("id", id).
+		Execute()
+	return err
 }
