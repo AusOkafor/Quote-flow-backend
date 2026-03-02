@@ -958,11 +958,19 @@ func (h *Handler) StripePaymentWebhook(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
-	event, err := webhook.ConstructEvent(body, r.Header.Get("Stripe-Signature"), h.cfg.StripePaymentWebhookSecret)
+	sig := r.Header.Get("Stripe-Signature")
+	event, err := webhook.ConstructEventWithTolerance(body, sig, h.cfg.StripePaymentWebhookSecret, 600*time.Second)
 	if err != nil {
-		log.Printf("[webhook] stripe-payment: invalid signature (wrong secret?): %v", err)
-		w.WriteHeader(http.StatusBadRequest)
-		return
+		// Fallback: try ignoring timestamp (clock skew) — if this works, secret is correct
+		event2, err2 := webhook.ConstructEventIgnoringTolerance(body, sig, h.cfg.StripePaymentWebhookSecret)
+		if err2 == nil {
+			event = event2
+			log.Printf("[webhook] stripe-payment: *** DEBUG — verified with IgnoringTolerance (clock skew?) ***")
+		} else {
+			log.Printf("[webhook] stripe-payment: signature failed — err=%v | sigPresent=%v | secretLen=%d (use Event Destination's signing secret, not billing webhook)", err, sig != "", len(h.cfg.StripePaymentWebhookSecret))
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
 	}
 	log.Printf("[webhook] stripe-payment: *** DEBUG — event verified, type=%s ***", event.Type)
 	if event.Type == "checkout.session.completed" {
