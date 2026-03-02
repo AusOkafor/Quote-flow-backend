@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"math"
 	"net/http"
 	"strconv"
@@ -946,28 +947,66 @@ func (h *Handler) CreateCheckoutSession(w http.ResponseWriter, r *http.Request) 
 // POST /webhooks/stripe-payment — Stripe Connect payment webhook (checkout.session.completed)
 func (h *Handler) StripePaymentWebhook(w http.ResponseWriter, r *http.Request) {
 	if h.cfg.StripePaymentWebhookSecret == "" {
+		log.Printf("[webhook] stripe-payment: STRIPE_PAYMENT_WEBHOOK_SECRET not set — webhook ignored")
 		w.WriteHeader(http.StatusOK)
 		return
 	}
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
+		log.Printf("[webhook] stripe-payment: failed to read body: %v", err)
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
 	event, err := webhook.ConstructEvent(body, r.Header.Get("Stripe-Signature"), h.cfg.StripePaymentWebhookSecret)
 	if err != nil {
+		log.Printf("[webhook] stripe-payment: invalid signature (wrong secret?): %v", err)
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
 	if event.Type == "checkout.session.completed" {
 		var sess stripe.CheckoutSession
 		if err := json.Unmarshal(event.Data.Raw, &sess); err != nil {
+			log.Printf("[webhook] stripe-payment: failed to unmarshal session: %v", err)
 			w.WriteHeader(http.StatusOK)
 			return
 		}
 		quoteID := sess.Metadata["quote_id"]
 		paymentType := models.PaymentType(sess.Metadata["payment_type"])
+
+		// Fallback: Payment Links on Connect may not pass metadata to session — look up by payment_link ID
+		paymentLinkID := ""
+		if sess.PaymentLink != nil && sess.PaymentLink.ID != "" {
+			paymentLinkID = sess.PaymentLink.ID
+		} else {
+			var raw struct {
+				PaymentLink *struct {
+					ID string `json:"id"`
+				} `json:"payment_link"`
+			}
+			if json.Unmarshal(event.Data.Raw, &raw) == nil && raw.PaymentLink != nil && raw.PaymentLink.ID != "" {
+				paymentLinkID = raw.PaymentLink.ID
+			} else {
+				var rawStr struct {
+					PaymentLink string `json:"payment_link"`
+				}
+				if json.Unmarshal(event.Data.Raw, &rawStr) == nil && rawStr.PaymentLink != "" {
+					paymentLinkID = rawStr.PaymentLink
+				}
+			}
+		}
+		if quoteID == "" && paymentLinkID != "" {
+			payment, err := h.db.GetPaymentByProcessorID(r.Context(), paymentLinkID, "stripe")
+			if err == nil && payment != nil {
+				quoteID = payment.QuoteID
+				paymentType = payment.PaymentType
+				log.Printf("[webhook] stripe-payment: resolved via payment_link fallback quote=%s type=%s", quoteID, paymentType)
+			}
+		}
+		if quoteID == "" {
+			log.Printf("[webhook] stripe-payment: could not resolve quote (metadata quote_id=%q, payment_link=%q)", sess.Metadata["quote_id"], paymentLinkID)
+		}
 		if quoteID != "" && (paymentType == models.PaymentTypeFull || paymentType == models.PaymentTypeDeposit || paymentType == models.PaymentTypeBalance) {
+			log.Printf("[webhook] stripe-payment: processing payment quote=%s type=%s", quoteID, paymentType)
 			h.handlePaymentConfirmed(r.Context(), quoteID, paymentType)
 		}
 	}
