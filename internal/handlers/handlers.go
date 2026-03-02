@@ -946,6 +946,7 @@ func (h *Handler) CreateCheckoutSession(w http.ResponseWriter, r *http.Request) 
 
 // POST /webhooks/stripe-payment — Stripe Connect payment webhook (checkout.session.completed)
 func (h *Handler) StripePaymentWebhook(w http.ResponseWriter, r *http.Request) {
+	log.Printf("[webhook] stripe-payment: *** DEBUG — request received ***")
 	if h.cfg.StripePaymentWebhookSecret == "" {
 		log.Printf("[webhook] stripe-payment: STRIPE_PAYMENT_WEBHOOK_SECRET not set — webhook ignored")
 		w.WriteHeader(http.StatusOK)
@@ -963,6 +964,7 @@ func (h *Handler) StripePaymentWebhook(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
+	log.Printf("[webhook] stripe-payment: *** DEBUG — event verified, type=%s ***", event.Type)
 	if event.Type == "checkout.session.completed" {
 		var sess stripe.CheckoutSession
 		if err := json.Unmarshal(event.Data.Raw, &sess); err != nil {
