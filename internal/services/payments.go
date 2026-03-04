@@ -2,12 +2,10 @@ package services
 
 import (
 	"bytes"
-	"crypto/hmac"
-	"crypto/sha256"
-	"io"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"strings"
@@ -21,7 +19,7 @@ import (
 	"quoteflow-backend/internal/models"
 )
 
-// PaymentService handles payment processor integrations (Stripe Connect, WiPay, PayPal).
+// PaymentService handles payment processor integrations (Stripe Connect, PayPal).
 type PaymentService struct {
 	cfg    *config.Config
 	client *http.Client
@@ -166,83 +164,6 @@ func (p *PaymentService) CreateStripePaymentLink(
 	return &StripePaymentLink{ID: pl.ID, URL: pl.URL}, nil
 }
 
-// ── WIPAY ────────────────────────────────────────────────────────────────────
-
-// WiPayLink holds the URL and transaction ID of a WiPay payment link.
-type WiPayLink struct {
-	URL           string
-	TransactionID string
-}
-
-// ValidateWiPayCredentials optionally validates WiPay API credentials. Returns nil for now.
-func (p *PaymentService) ValidateWiPayCredentials(accountID, apiKey string) error {
-	_ = accountID
-	_ = apiKey
-	return nil
-}
-
-// CreateWiPayLink creates a WiPay payment link for Caribbean currencies.
-func (p *PaymentService) CreateWiPayLink(
-	account *models.PaymentAccountFull,
-	quote *models.QuoteWithDetails,
-	amount float64,
-	paymentType models.PaymentType,
-) (*WiPayLink, error) {
-	country := "JM"
-	switch quote.Currency {
-	case "TTD":
-		country = "TT"
-	case "BBD":
-		country = "BB"
-	}
-
-	data := url.Values{}
-	data.Set("account_number", account.WiPayAccountID)
-	data.Set("avs", "0")
-	data.Set("country_code", country)
-	data.Set("currency", quote.Currency)
-	data.Set("environment", p.cfg.WiPayEnvironment)
-	data.Set("fee_structure", "1")
-	data.Set("order_id", quote.ID)
-	data.Set("redirect_url", strings.TrimSuffix(p.cfg.FrontendURL, "/")+"/payment/complete?quote="+url.QueryEscape(quote.ShareToken))
-	data.Set("total", fmt.Sprintf("%.2f", amount))
-	data.Set("hash", p.wipayHash(account.WiPayAPIKey, amount, quote.ID))
-
-	apiURL := strings.TrimSuffix(p.cfg.WiPayAPIURL, "/") + "/transactions/create"
-	req, err := http.NewRequest("POST", apiURL, strings.NewReader(data.Encode()))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-
-	resp, err := p.client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	var result struct {
-		URL           string `json:"url"`
-		TransactionID string `json:"transaction_id"`
-		Status        int    `json:"status"`
-		Message       string `json:"message"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("wipay response: %w", err)
-	}
-	if result.Status != 1 {
-		return nil, fmt.Errorf("WiPay error: %s", result.Message)
-	}
-	return &WiPayLink{URL: result.URL, TransactionID: result.TransactionID}, nil
-}
-
-func (p *PaymentService) wipayHash(apiKey string, amount float64, orderID string) string {
-	msg := fmt.Sprintf("%s%.2f%s", apiKey, amount, orderID)
-	mac := hmac.New(sha256.New, []byte(apiKey))
-	mac.Write([]byte(msg))
-	return hex.EncodeToString(mac.Sum(nil))
-}
-
 // ── PAYPAL ────────────────────────────────────────────────────────────────────
 
 // PayPalOrder holds the order ID and approval URL for a PayPal order.
@@ -254,10 +175,12 @@ type PayPalOrder struct {
 // CreatePayPalOnboardingLink creates a PayPal Commerce Platform onboarding link.
 func (p *PaymentService) CreatePayPalOnboardingLink(userID string) (string, error) {
 	if p.cfg.PayPalClientID == "" || p.cfg.PayPalClientSecret == "" {
+		log.Printf("[PayPal] CreateOnboardingLink failed: PayPal not configured (missing CLIENT_ID or CLIENT_SECRET)")
 		return "", fmt.Errorf("PayPal not configured")
 	}
 	token, err := p.getPayPalPlatformToken()
 	if err != nil {
+		log.Printf("[PayPal] CreateOnboardingLink failed at token: %v", err)
 		return "", err
 	}
 
@@ -290,9 +213,35 @@ func (p *PaymentService) CreatePayPalOnboardingLink(userID string) (string, erro
 
 	resp, err := p.client.Do(req)
 	if err != nil {
-		return "", err
+		log.Printf("[PayPal] CreateOnboardingLink HTTP request failed: %v", err)
+		return "", fmt.Errorf("PayPal request failed: %w", err)
 	}
 	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+
+	// Check for PayPal error response
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		var errResp struct {
+			Name    string `json:"name"`
+			Message string `json:"message"`
+			Details []struct {
+				Field   string `json:"field"`
+				Issue   string `json:"issue"`
+				Details string `json:"details"`
+			} `json:"details"`
+		}
+		_ = json.Unmarshal(respBody, &errResp)
+		msg := errResp.Message
+		if msg == "" {
+			msg = string(respBody)
+		}
+		if len(errResp.Details) > 0 && errResp.Details[0].Issue != "" {
+			msg = fmt.Sprintf("%s — %s", msg, errResp.Details[0].Issue)
+		}
+		log.Printf("[PayPal] CreateOnboardingLink partner-referrals failed: HTTP %d | raw: %s", resp.StatusCode, string(respBody))
+		return "", fmt.Errorf("PayPal partner-referrals (HTTP %d): %s", resp.StatusCode, msg)
+	}
 
 	var result struct {
 		Links []struct {
@@ -300,15 +249,16 @@ func (p *PaymentService) CreatePayPalOnboardingLink(userID string) (string, erro
 			Rel  string `json:"rel"`
 		} `json:"links"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", err
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return "", fmt.Errorf("PayPal response parse error: %w", err)
 	}
 	for _, link := range result.Links {
 		if link.Rel == "action_url" {
 			return link.Href, nil
 		}
 	}
-	return "", fmt.Errorf("no action_url in PayPal response")
+	log.Printf("[PayPal] CreateOnboardingLink no action_url in response: %s", string(respBody))
+	return "", fmt.Errorf("PayPal did not return action_url — check app is enabled for Commerce Platform")
 }
 
 // CreatePayPalOrder creates a PayPal order for USD payments.
@@ -319,7 +269,7 @@ func (p *PaymentService) CreatePayPalOrder(
 	paymentType models.PaymentType,
 ) (*PayPalOrder, error) {
 	if quote.Currency != "USD" {
-		return nil, fmt.Errorf("PayPal only supports USD. Use WiPay for %s", quote.Currency)
+		return nil, fmt.Errorf("PayPal only supports USD. Use Stripe for %s", quote.Currency)
 	}
 	token, err := p.getPayPalPlatformToken()
 	if err != nil {
@@ -399,18 +349,25 @@ func (p *PaymentService) CreatePayPalOrder(
 	return &PayPalOrder{OrderID: result.ID, ApproveURL: approveURL}, nil
 }
 
+// GetPayPalPlatformToken returns a platform access token for PayPal API calls (used by webhook verification).
+func (p *PaymentService) GetPayPalPlatformToken() (string, error) {
+	return p.getPayPalPlatformToken()
+}
+
 func (p *PaymentService) getPayPalPlatformToken() (string, error) {
 	if p.cfg.PayPalClientID == "" || p.cfg.PayPalClientSecret == "" {
 		return "", fmt.Errorf("PayPal not configured")
 	}
+	baseURL := p.payPalBaseURL()
 	data := url.Values{}
 	data.Set("grant_type", "client_credentials")
-	req, _ := http.NewRequest("POST", p.payPalBaseURL()+"/v1/oauth2/token", strings.NewReader(data.Encode()))
+	req, _ := http.NewRequest("POST", baseURL+"/v1/oauth2/token", strings.NewReader(data.Encode()))
 	req.SetBasicAuth(p.cfg.PayPalClientID, p.cfg.PayPalClientSecret)
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
 	resp, err := p.client.Do(req)
 	if err != nil {
+		log.Printf("[PayPal] getPlatformToken HTTP failed: %v", err)
 		return "", err
 	}
 	defer resp.Body.Close()
@@ -424,6 +381,8 @@ func (p *PaymentService) getPayPalPlatformToken() (string, error) {
 	_ = json.Unmarshal(body, &result)
 
 	if resp.StatusCode != http.StatusOK {
+		log.Printf("[PayPal] getPlatformToken failed: HTTP %d | error=%s | error_description=%s | raw: %s",
+			resp.StatusCode, result.Error, result.ErrorDesc, string(body))
 		if result.ErrorDesc != "" {
 			return "", fmt.Errorf("PayPal: %s", result.ErrorDesc)
 		}
@@ -433,6 +392,7 @@ func (p *PaymentService) getPayPalPlatformToken() (string, error) {
 		return "", fmt.Errorf("PayPal auth failed (HTTP %d)", resp.StatusCode)
 	}
 	if result.AccessToken == "" {
+		log.Printf("[PayPal] getPlatformToken no token in 200 response: %s", string(body))
 		return "", fmt.Errorf("PayPal: no access token in response")
 	}
 	return result.AccessToken, nil

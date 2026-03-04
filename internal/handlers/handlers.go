@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -18,6 +19,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-playground/validator/v10"
 	"github.com/stripe/stripe-go/v76"
+	portalsession "github.com/stripe/stripe-go/v76/billingportal/session"
 	"github.com/stripe/stripe-go/v76/checkout/session"
 	"github.com/stripe/stripe-go/v76/customer"
 	"github.com/stripe/stripe-go/v76/webhook"
@@ -404,32 +406,6 @@ func (h *Handler) ListPaymentAccounts(w http.ResponseWriter, r *http.Request) {
 	h.ok(w, accounts)
 }
 
-// POST /payments/connect/wipay
-func (h *Handler) ConnectWiPay(w http.ResponseWriter, r *http.Request) {
-	user := currentUser(r)
-	var req models.ConnectWiPayRequest
-	if err := h.decode(r, &req); err != nil {
-		h.err(w, http.StatusBadRequest, "invalid request body")
-		return
-	}
-	if err := h.validateRequest(&req); err != nil {
-		h.err(w, http.StatusBadRequest, validationErrorMsg(err))
-		return
-	}
-	if err := h.payments.ValidateWiPayCredentials(req.AccountID, req.APIKey); err != nil {
-		h.err(w, http.StatusBadRequest, "invalid WiPay credentials: "+err.Error())
-		return
-	}
-	if err := h.db.UpsertPaymentAccount(r.Context(), user.ID, "wipay", map[string]string{
-		"wipay_account_id": req.AccountID,
-		"wipay_api_key":    req.APIKey,
-	}); err != nil {
-		h.err(w, http.StatusInternalServerError, "failed to save WiPay account")
-		return
-	}
-	h.ok(w, map[string]string{"status": "connected"})
-}
-
 // POST /payments/connect/stripe
 func (h *Handler) ConnectStripe(w http.ResponseWriter, r *http.Request) {
 	user := currentUser(r)
@@ -469,7 +445,12 @@ func (h *Handler) ConnectPayPal(w http.ResponseWriter, r *http.Request) {
 	user := currentUser(r)
 	onboardingURL, err := h.payments.CreatePayPalOnboardingLink(user.ID)
 	if err != nil {
-		h.err(w, http.StatusInternalServerError, "failed to create PayPal onboarding link")
+		log.Printf("[PayPal] ConnectPayPal handler error: %v", err)
+		errMsg := "failed to create PayPal onboarding link"
+		if h.cfg.IsDevelopment() {
+			errMsg = err.Error()
+		}
+		h.err(w, http.StatusInternalServerError, errMsg)
 		return
 	}
 	h.ok(w, map[string]string{"url": onboardingURL})
@@ -496,7 +477,7 @@ func (h *Handler) PayPalConnectCallback(w http.ResponseWriter, r *http.Request) 
 func (h *Handler) DisconnectProcessor(w http.ResponseWriter, r *http.Request) {
 	user := currentUser(r)
 	processor := chi.URLParam(r, "processor")
-	if processor != "wipay" && processor != "stripe" && processor != "paypal" {
+	if processor != "stripe" && processor != "paypal" {
 		h.err(w, http.StatusBadRequest, "invalid processor")
 		return
 	}
@@ -555,7 +536,7 @@ func (h *Handler) CreatePaymentLink(w http.ResponseWriter, r *http.Request) {
 
 	account, err := h.db.GetBestPaymentAccountFull(r.Context(), user.ID, quote.Currency)
 	if err != nil || account == nil {
-		h.err(w, http.StatusBadRequest, "no payment processor connected for "+quote.Currency+" quotes. Connect WiPay, Stripe, or PayPal in Settings.")
+		h.err(w, http.StatusBadRequest, "no payment processor connected for "+quote.Currency+" quotes. Connect Stripe or PayPal in Settings.")
 		return
 	}
 
@@ -576,13 +557,6 @@ func (h *Handler) CreatePaymentLink(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		paymentURL, processorPaymentID = link.ApproveURL, link.OrderID
-	case models.ProcessorWiPay:
-		link, err := h.payments.CreateWiPayLink(account, quote, amount, req.PaymentType)
-		if err != nil {
-			h.err(w, http.StatusInternalServerError, "WiPay error: "+err.Error())
-			return
-		}
-		paymentURL, processorPaymentID = link.URL, link.TransactionID
 	default:
 		h.err(w, http.StatusBadRequest, "unsupported processor")
 		return
@@ -646,7 +620,7 @@ func (h *Handler) PublicCreatePaymentLink(w http.ResponseWriter, r *http.Request
 
 	var req struct {
 		PaymentType models.PaymentType `json:"payment_type"`
-		Processor   string            `json:"processor"` // optional: wipay, stripe, paypal — client picks when multiple available
+		Processor   string            `json:"processor"` // optional: stripe, paypal — client picks when multiple available
 	}
 	if err := h.decode(r, &req); err != nil || req.PaymentType == "" {
 		h.err(w, http.StatusBadRequest, "payment_type required")
@@ -662,7 +636,7 @@ func (h *Handler) PublicCreatePaymentLink(w http.ResponseWriter, r *http.Request
 	var account *models.PaymentAccountFull
 	if req.Processor != "" {
 		proc := models.PaymentProcessor(req.Processor)
-		if proc != models.ProcessorWiPay && proc != models.ProcessorStripe && proc != models.ProcessorPayPal {
+		if proc != models.ProcessorStripe && proc != models.ProcessorPayPal {
 			h.err(w, http.StatusBadRequest, "invalid processor")
 			return
 		}
@@ -719,13 +693,6 @@ func (h *Handler) PublicCreatePaymentLink(w http.ResponseWriter, r *http.Request
 			return
 		}
 		paymentURL, processorPaymentID = link.ApproveURL, link.OrderID
-	case models.ProcessorWiPay:
-		link, err := h.payments.CreateWiPayLink(account, quote, amount, req.PaymentType)
-		if err != nil {
-			h.err(w, http.StatusInternalServerError, "payment link failed")
-			return
-		}
-		paymentURL, processorPaymentID = link.URL, link.TransactionID
 	default:
 		h.err(w, http.StatusBadRequest, "unsupported processor")
 		return
@@ -944,9 +911,33 @@ func (h *Handler) CreateCheckoutSession(w http.ResponseWriter, r *http.Request) 
 		h.ok(w, map[string]string{"url": sess.URL})
 }
 
+// POST /billing/portal — create Stripe Customer Portal session (manage subscription, payment methods)
+func (h *Handler) CreateBillingPortalSession(w http.ResponseWriter, r *http.Request) {
+	if h.cfg.StripeSecretKey == "" {
+		h.err(w, http.StatusServiceUnavailable, "billing not configured")
+		return
+	}
+	user := currentUser(r)
+	profile, _ := h.db.GetProfile(r.Context(), user.ID)
+	if profile == nil || profile.StripeCustomerID == "" {
+		h.err(w, http.StatusBadRequest, "no billing account — subscribe to a plan first")
+		return
+	}
+	stripe.Key = h.cfg.StripeSecretKey
+	returnURL := strings.TrimSuffix(h.cfg.FrontendURL, "/") + "/app/settings?panel=billing"
+	sess, err := portalsession.New(&stripe.BillingPortalSessionParams{
+		Customer:  stripe.String(profile.StripeCustomerID),
+		ReturnURL: stripe.String(returnURL),
+	})
+	if err != nil {
+		h.err(w, http.StatusInternalServerError, "failed to create portal session")
+		return
+	}
+	h.ok(w, map[string]string{"url": sess.URL})
+}
+
 // POST /webhooks/stripe-payment — Stripe Connect payment webhook (checkout.session.completed)
 func (h *Handler) StripePaymentWebhook(w http.ResponseWriter, r *http.Request) {
-	log.Printf("[webhook] stripe-payment: *** DEBUG — request received ***")
 	if h.cfg.StripePaymentWebhookSecret == "" {
 		log.Printf("[webhook] stripe-payment: STRIPE_PAYMENT_WEBHOOK_SECRET not set — webhook ignored")
 		w.WriteHeader(http.StatusOK)
@@ -968,7 +959,6 @@ func (h *Handler) StripePaymentWebhook(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
-	log.Printf("[webhook] stripe-payment: *** DEBUG — event verified, type=%s ***", event.Type)
 	if event.Type == "checkout.session.completed" {
 		var sess stripe.CheckoutSession
 		if err := json.Unmarshal(event.Data.Raw, &sess); err != nil {
@@ -1005,14 +995,9 @@ func (h *Handler) StripePaymentWebhook(w http.ResponseWriter, r *http.Request) {
 			if err == nil && payment != nil {
 				quoteID = payment.QuoteID
 				paymentType = payment.PaymentType
-				log.Printf("[webhook] stripe-payment: resolved via payment_link fallback quote=%s type=%s", quoteID, paymentType)
 			}
 		}
-		if quoteID == "" {
-			log.Printf("[webhook] stripe-payment: could not resolve quote (metadata quote_id=%q, payment_link=%q)", sess.Metadata["quote_id"], paymentLinkID)
-		}
 		if quoteID != "" && (paymentType == models.PaymentTypeFull || paymentType == models.PaymentTypeDeposit || paymentType == models.PaymentTypeBalance) {
-			log.Printf("[webhook] stripe-payment: processing payment quote=%s type=%s", quoteID, paymentType)
 			h.handlePaymentConfirmed(r.Context(), quoteID, paymentType)
 		}
 	}
@@ -1021,14 +1006,32 @@ func (h *Handler) StripePaymentWebhook(w http.ResponseWriter, r *http.Request) {
 
 // POST /webhooks/paypal — PayPal payment webhook
 func (h *Handler) PayPalWebhook(w http.ResponseWriter, r *http.Request) {
+	// Step 1: Read raw body (required for signature verification)
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		h.err(w, http.StatusBadRequest, "failed to read body")
+		return
+	}
+
+	// Step 2: Verify signature with PayPal (skip if webhook not configured)
+	if h.cfg.PayPalWebhookID != "" {
+		if err := h.verifyPayPalWebhook(r, body); err != nil {
+			log.Printf("PayPal webhook signature verification failed: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+	}
+
+	// Step 3: Process event
 	var event struct {
 		EventType string          `json:"event_type"`
 		Resource  json.RawMessage `json:"resource"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&event); err != nil {
-		w.WriteHeader(http.StatusOK)
+	if err := json.Unmarshal(body, &event); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
+
 	if event.EventType == "PAYMENT.CAPTURE.COMPLETED" {
 		var capture struct {
 			SupplementaryData struct {
@@ -1037,38 +1040,61 @@ func (h *Handler) PayPalWebhook(w http.ResponseWriter, r *http.Request) {
 				} `json:"related_ids"`
 			} `json:"supplementary_data"`
 		}
-		if err := json.Unmarshal(event.Resource, &capture); err != nil {
-			w.WriteHeader(http.StatusOK)
-			return
-		}
+		_ = json.Unmarshal(event.Resource, &capture)
 		orderID := capture.SupplementaryData.RelatedIDs.OrderID
+
 		payment, err := h.db.GetPaymentByProcessorID(r.Context(), orderID, "paypal")
-		if err != nil || payment == nil {
-			w.WriteHeader(http.StatusOK)
-			return
+		if err == nil && payment != nil {
+			h.handlePaymentConfirmed(r.Context(), payment.QuoteID, payment.PaymentType)
 		}
-		h.handlePaymentConfirmed(r.Context(), payment.QuoteID, payment.PaymentType)
 	}
 	w.WriteHeader(http.StatusOK)
 }
 
-// POST /webhooks/wipay — WiPay payment webhook
-func (h *Handler) WiPayWebhook(w http.ResponseWriter, r *http.Request) {
-	if err := r.ParseForm(); err != nil {
-		w.WriteHeader(http.StatusOK)
-		return
+// verifyPayPalWebhook calls PayPal's verification API to confirm the webhook is genuine.
+func (h *Handler) verifyPayPalWebhook(r *http.Request, body []byte) error {
+	accessToken, err := h.payments.GetPayPalPlatformToken()
+	if err != nil {
+		return fmt.Errorf("failed to get PayPal token: %w", err)
 	}
-	transactionID := r.FormValue("transaction_id")
-	status := r.FormValue("status")
-	if status == "success" && transactionID != "" {
-		payment, err := h.db.GetPaymentByProcessorID(r.Context(), transactionID, "wipay")
-		if err != nil || payment == nil {
-			w.WriteHeader(http.StatusOK)
-			return
-		}
-		h.handlePaymentConfirmed(r.Context(), payment.QuoteID, payment.PaymentType)
+
+	verifyPayload := map[string]interface{}{
+		"auth_algo":         r.Header.Get("PAYPAL-AUTH-ALGO"),
+		"cert_url":          r.Header.Get("PAYPAL-CERT-URL"),
+		"transmission_id":   r.Header.Get("PAYPAL-TRANSMISSION-ID"),
+		"transmission_sig":  r.Header.Get("PAYPAL-TRANSMISSION-SIG"),
+		"transmission_time": r.Header.Get("PAYPAL-TRANSMISSION-TIME"),
+		"webhook_id":        h.cfg.PayPalWebhookID,
+		"webhook_event":     json.RawMessage(body),
 	}
-	w.WriteHeader(http.StatusOK)
+
+	payloadBytes, _ := json.Marshal(verifyPayload)
+	baseURL := "https://api.paypal.com"
+	if strings.ToLower(h.cfg.PayPalEnvironment) == "sandbox" {
+		baseURL = "https://api.sandbox.paypal.com"
+	}
+	req, _ := http.NewRequestWithContext(r.Context(), "POST",
+		baseURL+"/v1/notifications/verify-webhook-signature",
+		bytes.NewReader(payloadBytes))
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("PayPal verify request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		VerificationStatus string `json:"verification_status"`
+	}
+	_ = json.NewDecoder(resp.Body).Decode(&result)
+
+	if result.VerificationStatus != "SUCCESS" {
+		return fmt.Errorf("PayPal verification status: %s", result.VerificationStatus)
+	}
+	return nil
 }
 
 // handlePaymentConfirmed is called by payment webhooks when payment succeeds.
@@ -1341,11 +1367,17 @@ func (h *Handler) UpdateClient(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) DeleteClient(w http.ResponseWriter, r *http.Request) {
 	user := currentUser(r)
 	id := chi.URLParam(r, "id")
+	// Proactive check: client with quotes cannot be deleted (FK restrict)
+	count, err := h.db.CountQuotesForClient(r.Context(), id)
+	if err != nil {
+		h.err(w, http.StatusInternalServerError, "failed to check client")
+		return
+	}
+	if count > 0 {
+		h.err(w, http.StatusConflict, "cannot delete client with existing quotes — delete or reassign their quotes first")
+		return
+	}
 	if err := h.db.DeleteClient(r.Context(), id, user.ID); err != nil {
-		if strings.Contains(err.Error(), "foreign key") || strings.Contains(err.Error(), "violates") || strings.Contains(err.Error(), "restrict") {
-			h.err(w, http.StatusConflict, "cannot delete client with existing quotes — delete or reassign their quotes first")
-			return
-		}
 		h.err(w, http.StatusInternalServerError, "failed to delete client")
 		return
 	}

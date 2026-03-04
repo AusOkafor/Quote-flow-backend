@@ -13,6 +13,7 @@ import (
 	supa "github.com/supabase-community/supabase-go"
 	"quoteflow-backend/config"
 	"quoteflow-backend/internal/models"
+	"quoteflow-backend/internal/services"
 )
 
 // DB wraps the Supabase client and exposes all data access methods.
@@ -254,6 +255,22 @@ func (db *DB) UpdateClient(ctx context.Context, c *models.Client) error {
 	}
 	_, _, err := q.Execute()
 	return err
+}
+
+// CountQuotesForClient returns the number of quotes referencing this client.
+func (db *DB) CountQuotesForClient(ctx context.Context, clientID string) (int, error) {
+	raw, _, err := db.client.From("quotes").
+		Select("id", "exact", false).
+		Eq("client_id", clientID).
+		Execute()
+	if err != nil {
+		return 0, err
+	}
+	var rows []struct{ ID string `json:"id"` }
+	if err := decode(raw, &rows); err != nil {
+		return 0, err
+	}
+	return len(rows), nil
 }
 
 func (db *DB) DeleteClient(ctx context.Context, id, userID string) error {
@@ -718,7 +735,7 @@ func (db *DB) AcceptQuote(ctx context.Context, token string, sigName string) (*m
 	}
 	var results []models.Quote
 	if err := decode(raw, &results); err != nil || len(results) == 0 {
-		return nil, fmt.Errorf("quote not found, already accepted, or expired")
+		return nil, fmt.Errorf("quote is not available for acceptance — it may have already been accepted, expired, or the link is invalid")
 	}
 	return &results[0], nil
 }
@@ -1631,7 +1648,21 @@ func (db *DB) GetPaymentAccountFull(ctx context.Context, userID, processor strin
 	if len(rows) == 0 {
 		return nil, fmt.Errorf("payment account not found")
 	}
-	return &rows[0], nil
+	acc := &rows[0]
+	// Decrypt credentials when reading (backwards compat: plaintext returned if decrypt fails)
+	if db.cfg.EncryptionKey != "" {
+		if acc.StripeAccessToken != "" {
+			if dec, err := services.Decrypt(acc.StripeAccessToken, db.cfg.EncryptionKey); err == nil {
+				acc.StripeAccessToken = dec
+			}
+		}
+		if acc.PayPalAccessToken != "" {
+			if dec, err := services.Decrypt(acc.PayPalAccessToken, db.cfg.EncryptionKey); err == nil {
+				acc.PayPalAccessToken = dec
+			}
+		}
+	}
+	return acc, nil
 }
 
 func (db *DB) UpsertPaymentAccount(ctx context.Context, userID, processor string, fields map[string]string) error {
@@ -1642,7 +1673,15 @@ func (db *DB) UpsertPaymentAccount(ctx context.Context, userID, processor string
 		"updated_at":  time.Now(),
 	}
 	for k, v := range fields {
-		row[k] = v
+		if db.cfg.EncryptionKey != "" && (k == "stripe_access_token" || k == "paypal_access_token") {
+			encrypted, err := services.Encrypt(v, db.cfg.EncryptionKey)
+			if err != nil {
+				return fmt.Errorf("encrypting %s: %w", k, err)
+			}
+			row[k] = encrypted
+		} else {
+			row[k] = v
+		}
 	}
 	_, _, err := db.client.From("payment_accounts").
 		Upsert(row, "user_id,processor", "representation", "").
@@ -1659,38 +1698,30 @@ func (db *DB) DisconnectPaymentAccount(ctx context.Context, userID, processor st
 	return err
 }
 
-// GetBestPaymentAccountFull returns the best account for the given currency (with credentials).
-// JMD/TTD/BBD → WiPay; USD → Stripe or PayPal (from profile preference).
 // ListPaymentProcessorsForCurrency returns processors available for the given currency.
-// JMD/TTD/BBD → ["wipay"] if connected; USD → ["stripe","paypal"] for each connected.
+// Stripe supports JMD/TTD/BBD/USD; PayPal supports USD only.
 func (db *DB) ListPaymentProcessorsForCurrency(ctx context.Context, userID, currency string) []string {
 	accounts, err := db.ListPaymentAccounts(ctx, userID)
 	if err != nil || len(accounts) == 0 {
 		return nil
 	}
-	caribbean := map[string]bool{"JMD": true, "TTD": true, "BBD": true}
-	if caribbean[currency] {
-		for _, a := range accounts {
-			if a.Processor == models.ProcessorWiPay {
-				return []string{string(models.ProcessorWiPay)}
-			}
-		}
-		return nil
-	}
 	var out []string
 	for _, a := range accounts {
-		if (a.Processor == models.ProcessorStripe || a.Processor == models.ProcessorPayPal) && a.IsActive {
-			out = append(out, string(a.Processor))
+		if !a.IsActive {
+			continue
+		}
+		if a.Processor == models.ProcessorStripe {
+			out = append(out, string(models.ProcessorStripe))
+		} else if a.Processor == models.ProcessorPayPal && currency == "USD" {
+			out = append(out, string(models.ProcessorPayPal))
 		}
 	}
 	return out
 }
 
+// GetBestPaymentAccountFull returns the best account for the given currency (with credentials).
+// USD → Stripe or PayPal from profile preference; other currencies → Stripe.
 func (db *DB) GetBestPaymentAccountFull(ctx context.Context, userID, currency string) (*models.PaymentAccountFull, error) {
-	caribbean := map[string]bool{"JMD": true, "TTD": true, "BBD": true}
-	if caribbean[currency] {
-		return db.GetPaymentAccountFull(ctx, userID, "wipay")
-	}
 	profile, _ := db.GetProfile(ctx, userID)
 	pref := "stripe"
 	if profile != nil && profile.PreferredUSDProcessor != nil && *profile.PreferredUSDProcessor != "" {

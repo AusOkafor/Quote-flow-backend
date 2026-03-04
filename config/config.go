@@ -47,6 +47,9 @@ type Config struct {
 	// Cron: secret for internal cron endpoints (e.g. reminders)
 	CronSecret string
 
+	// Encryption key for payment credentials at rest (AES-256-GCM)
+	EncryptionKey string
+
 	// Stripe (billing + Connect for payments)
 	StripeSecretKey            string
 	StripeClientID             string // Connect OAuth
@@ -96,6 +99,7 @@ func Load() (*Config, error) {
 		QuoteLinkBaseURL:        getEnv("QUOTE_LINK_BASE_URL", "https://quote-flow-phi.vercel.app/q"),
 		DevBypassUserID:         getEnv("DEV_BYPASS_USER_ID", "4946c101-f0e4-4c6d-a094-012a6ff7775a"),
 		CronSecret:              getEnv("CRON_SECRET", ""),
+		EncryptionKey:            getEnv("ENCRYPTION_KEY", ""),
 		StripeSecretKey:            getEnv("STRIPE_SECRET_KEY", ""),
 		StripeClientID:              getEnv("STRIPE_CLIENT_ID", ""),
 		StripeWebhookSecret:         getEnv("STRIPE_WEBHOOK_SECRET", ""),

@@ -45,8 +45,10 @@ func main() {
 	}
 
 	// ── Rate limiters ────────────────────────────────────────
-	publicLimiter := middleware.NewRateLimiter(10, 20)   // 10 req/s per IP, burst 20
-	apiLimiter    := middleware.NewRateLimiter(30, 60)    // 30 req/s per IP, burst 60
+	publicLimiter  := middleware.NewRateLimiter(10, 20)   // 10 req/s, burst 20 — general public
+	paymentLimiter := middleware.NewRateLimiter(1, 3)    // 1 req/s, burst 3  — payment link creation
+	acceptLimiter  := middleware.NewRateLimiter(2, 5)    // 2 req/s, burst 5  — quote acceptance
+	apiLimiter     := middleware.NewRateLimiter(30, 60)  // 30 req/s per IP, burst 60
 
 	// ── Router ───────────────────────────────────────────────
 	r := chi.NewRouter()
@@ -57,6 +59,13 @@ func main() {
 	r.Use(chimiddleware.Logger)
 	r.Use(chimiddleware.Recoverer)
 	r.Use(chimiddleware.Timeout(30 * time.Second))
+	// Limit request body size to 1MB for all routes
+	r.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1MB
+			next.ServeHTTP(w, r)
+		})
+	})
 	r.Use(cors.Handler(cors.Options{
 		AllowedOrigins:   cfg.AllowedOrigins,
 		AllowedMethods:   []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
@@ -82,7 +91,6 @@ func main() {
 	// Payment webhooks (no auth, verify by signature or form)
 	r.With(apiLimiter.Limit).Post("/webhooks/stripe-payment", h.StripePaymentWebhook)
 	r.With(apiLimiter.Limit).Post("/webhooks/paypal", h.PayPalWebhook)
-	r.With(apiLimiter.Limit).Post("/webhooks/wipay", h.WiPayWebhook)
 
 	// OAuth callbacks (public — Stripe/PayPal redirect here)
 	r.With(apiLimiter.Limit).Get("/payments/connect/stripe/callback", h.StripeConnectCallback)
@@ -91,11 +99,11 @@ func main() {
 	// Public quote viewer — clients open these from WhatsApp/email links
 	r.Route("/q/{token}", func(r chi.Router) {
 		r.Use(publicLimiter.Limit)
-		r.Get("/",        h.PublicGetQuote)    // load quote data for viewer
-		r.Post("/accept", h.PublicAcceptQuote) // client accepts the quote
-		r.Post("/pay",    h.PublicCreatePaymentLink) // client creates payment link
-		r.Get("/notes",   h.PublicGetNotes)    // notes thread (public)
-		r.Post("/notes",  h.PublicPostNote)    // client posts note (public)
+		r.Get("/", h.PublicGetQuote) // load quote data for viewer
+		r.With(acceptLimiter.Limit).Post("/accept", h.PublicAcceptQuote)
+		r.With(paymentLimiter.Limit).Post("/pay", h.PublicCreatePaymentLink)
+		r.Get("/notes", h.PublicGetNotes)
+		r.With(acceptLimiter.Limit).Post("/notes", h.PublicPostNote)
 	})
 
 	// ── Protected routes (JWT required) ──────────────────────
@@ -130,11 +138,11 @@ func main() {
 
 		// Billing (Stripe)
 		r.Post("/billing/create-checkout-session", h.CreateCheckoutSession)
+		r.Post("/billing/portal", h.CreateBillingPortalSession)
 
 		// Payments (Stripe Connect, PayPal, WiPay)
 		r.Route("/payments", func(r chi.Router) {
 			r.Get("/accounts", h.ListPaymentAccounts)
-			r.Post("/connect/wipay", h.ConnectWiPay)
 			r.Post("/connect/stripe", h.ConnectStripe)
 			r.Post("/connect/paypal", h.ConnectPayPal)
 			r.Delete("/disconnect/{processor}", h.DisconnectProcessor)
