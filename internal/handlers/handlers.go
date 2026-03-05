@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"html"
 	"io"
 	"log"
 	"math"
@@ -787,10 +788,15 @@ func (h *Handler) PublicCreatePaymentLink(w http.ResponseWriter, r *http.Request
 }
 
 // GET /q/:token/wipay-checkout?type=full|deposit|balance — public
-// Proxies WiPay payment page: fetches HTML from WiPay and returns it.
-// Client navigates here directly; no POST /pay needed for WiPay.
+// Returns an auto-submitting HTML form that POSTs directly to WiPay.
+// The browser submits to WiPay's domain — no CORS issues.
 func (h *Handler) WiPayCheckout(w http.ResponseWriter, r *http.Request) {
 	token := chi.URLParam(r, "token")
+	paymentTypeStr := r.URL.Query().Get("type")
+	if paymentTypeStr == "" {
+		paymentTypeStr = "full"
+	}
+
 	quote, err := h.db.GetQuoteByShareToken(r.Context(), token)
 	if err != nil || quote == nil {
 		h.err(w, http.StatusNotFound, "quote not found")
@@ -805,10 +811,6 @@ func (h *Handler) WiPayCheckout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	paymentTypeStr := r.URL.Query().Get("type")
-	if paymentTypeStr == "" {
-		paymentTypeStr = "full"
-	}
 	paymentType := models.PaymentType(paymentTypeStr)
 	if paymentType != models.PaymentTypeFull && paymentType != models.PaymentTypeDeposit && paymentType != models.PaymentTypeBalance {
 		h.err(w, http.StatusBadRequest, "type must be full, deposit, or balance")
@@ -831,7 +833,7 @@ func (h *Handler) WiPayCheckout(w http.ResponseWriter, r *http.Request) {
 	}
 
 	account, err := h.db.GetPaymentAccountFull(r.Context(), quote.UserID, "wipay")
-	if err != nil || account == nil {
+	if err != nil || account == nil || !account.IsActive {
 		h.err(w, http.StatusBadRequest, "WiPay not connected")
 		return
 	}
@@ -848,22 +850,86 @@ func (h *Handler) WiPayCheckout(w http.ResponseWriter, r *http.Request) {
 		Status:             models.PaymentStatusPending,
 		ProcessorPaymentID: token,
 	}
-	if err := h.db.CreatePayment(r.Context(), payment); err != nil {
-		log.Printf("[WiPay] WiPayCheckout CreatePayment failed: %v", err)
-		h.err(w, http.StatusInternalServerError, "failed to create payment record")
-		return
-	}
+	_ = h.db.CreatePayment(r.Context(), payment)
 
-	paymentURL, err := h.payments.CreateWiPayCheckout(account, amount, quote.Currency, token)
+	formData, err := h.payments.GetWiPayFormData(account, amount, quote.Currency, token)
 	if err != nil {
-		log.Printf("[WiPay] WiPayCheckout CreateWiPayCheckout failed: %v", err)
-		h.err(w, http.StatusInternalServerError, "failed to create WiPay checkout")
+		log.Printf("[WiPay] WiPayCheckout GetWiPayFormData failed: %v", err)
+		h.err(w, http.StatusInternalServerError, "failed to prepare WiPay checkout")
 		return
 	}
 
-	// Redirect user directly to WiPay's hosted payment page.
-	// This avoids all CORS issues — user is now on WiPay's domain.
-	http.Redirect(w, r, paymentURL, http.StatusFound)
+	// Return an auto-submitting HTML form that POSTs directly to WiPay.
+	// This bypasses all CORS issues — the browser submits directly to WiPay's domain.
+	html := fmt.Sprintf(`<!DOCTYPE html>
+<html>
+<head>
+    <title>Redirecting to WiPay...</title>
+    <style>
+        body { 
+            font-family: -apple-system, sans-serif; 
+            display: flex; 
+            justify-content: center; 
+            align-items: center; 
+            height: 100vh; 
+            margin: 0;
+            background: #f5f5f5;
+        }
+        .box {
+            text-align: center;
+            background: white;
+            padding: 40px;
+            border-radius: 12px;
+            box-shadow: 0 2px 20px rgba(0,0,0,0.08);
+        }
+        p { color: #666; margin-top: 12px; }
+    </style>
+</head>
+<body>
+    <div class="box">
+        <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="#E85C2F" stroke-width="2">
+            <circle cx="12" cy="12" r="10"/>
+            <path d="M12 6v6l4 2"/>
+        </svg>
+        <p>Redirecting to WiPay secure checkout...</p>
+    </div>
+    <form id="wipay-form" method="POST" action="%s">
+        <input type="hidden" name="account_number" value="%s">
+        <input type="hidden" name="avs" value="%s">
+        <input type="hidden" name="country_code" value="%s">
+        <input type="hidden" name="currency" value="%s">
+        <input type="hidden" name="environment" value="%s">
+        <input type="hidden" name="fee_structure" value="%s">
+        <input type="hidden" name="method" value="%s">
+        <input type="hidden" name="order_id" value="%s">
+        <input type="hidden" name="origin" value="%s">
+        <input type="hidden" name="response_url" value="%s">
+        <input type="hidden" name="return_url" value="%s">
+        <input type="hidden" name="total" value="%s">
+    </form>
+    <script>
+        document.getElementById("wipay-form").submit();
+    </script>
+</body>
+</html>`,
+		formData.Endpoint,
+		html.EscapeString(formData.AccountNumber),
+		html.EscapeString(formData.AVS),
+		html.EscapeString(formData.CountryCode),
+		html.EscapeString(formData.Currency),
+		html.EscapeString(formData.Environment),
+		html.EscapeString(formData.FeeStructure),
+		html.EscapeString(formData.Method),
+		html.EscapeString(formData.OrderID),
+		html.EscapeString(formData.Origin),
+		html.EscapeString(formData.ResponseURL),
+		html.EscapeString(formData.ReturnURL),
+		html.EscapeString(formData.Total),
+	)
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(html))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

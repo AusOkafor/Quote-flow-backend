@@ -8,7 +8,6 @@ import (
 	"log"
 	"net/http"
 	"net/url"
-	"regexp"
 	"strings"
 	"time"
 
@@ -430,118 +429,58 @@ func wipayCountryCode(currency string) string {
 	}
 }
 
-// CreateWiPayCheckout POSTs to WiPay and extracts the payment page URL from the HTML response.
-// WiPay embeds the redirect URL in the response — we extract it and redirect the user directly.
-// This avoids CORS issues; the user pays on WiPay's domain.
-//
-// Flow:
-//  1. We POST form fields to the country-specific WiPay endpoint
-//  2. WiPay responds with HTML containing the payment page URL
-//  3. We extract the URL and return it; handler redirects the user
-//  4. After payment, WiPay redirects to return_url and POSTs to response_url (webhook)
-//
-// Platform fee: NONE — 0% for WiPay.
-func (p *PaymentService) CreateWiPayCheckout(
+// WiPayFormData holds the form fields for a client-side POST to WiPay.
+// The browser submits this form directly to WiPay's domain — no CORS issues.
+type WiPayFormData struct {
+	Endpoint      string
+	AccountNumber string
+	AVS           string
+	CountryCode   string
+	Currency      string
+	Environment   string
+	FeeStructure  string
+	Method        string
+	OrderID       string
+	Origin        string
+	ResponseURL   string
+	ReturnURL     string
+	Total         string
+}
+
+// GetWiPayFormData returns form fields for a client-side POST to WiPay.
+// The frontend renders an auto-submitting form that POSTs directly to WiPay.
+func (p *PaymentService) GetWiPayFormData(
 	account *models.PaymentAccountFull,
 	amount float64,
 	currency string,
 	quoteToken string,
-) (string, error) {
+) (*WiPayFormData, error) {
 	if account.WiPayAccountID == "" || account.WiPayAPIKey == "" {
-		log.Printf("[WiPay] CreateWiPayCheckout failed: WiPay account not connected (missing account_number or api_key)")
-		return "", fmt.Errorf("WiPay account not connected")
+		return nil, fmt.Errorf("WiPay account not connected")
 	}
-
-	endpoint := wipayEndpoint(currency)
-	countryCode := wipayCountryCode(currency)
 
 	env := p.cfg.WiPayEnvironment
 	if env == "" {
 		env = "sandbox"
 	}
-	log.Printf("[WiPay] CreateWiPayCheckout: amount=%.2f currency=%s countryCode=%s order_id=%s env=%s endpoint=%s",
-		amount, currency, countryCode, quoteToken, env, endpoint)
 
 	responseURL := strings.TrimSuffix(p.cfg.AppURL, "/") + "/webhooks/wipay"
 	returnURL := strings.TrimSuffix(p.cfg.FrontendURL, "/") + "/payment/complete?quote=" + url.QueryEscape(quoteToken)
 
-	formData := url.Values{}
-	formData.Set("account_number", account.WiPayAccountID)
-	formData.Set("avs", "0")
-	formData.Set("country_code", countryCode)
-	formData.Set("currency", currency)
-	formData.Set("environment", env)
-	formData.Set("fee_structure", "merchant_absorb")
-	formData.Set("method", "credit_card")
-	formData.Set("order_id", quoteToken)
-	formData.Set("origin", "QuoteFlow")
-	formData.Set("response_url", responseURL)
-	formData.Set("return_url", returnURL)
-	formData.Set("total", fmt.Sprintf("%.2f", amount))
-
-	log.Printf("[WiPay] form fields: account_number=%s environment=%s fee_structure=%s method=%s country_code=%s total=%s order_id=%s",
-		account.WiPayAccountID,
-		formData.Get("environment"),
-		formData.Get("fee_structure"),
-		formData.Get("method"),
-		formData.Get("country_code"),
-		formData.Get("total"),
-		formData.Get("order_id"),
-	)
-
-	req, err := http.NewRequest("POST", endpoint, strings.NewReader(formData.Encode()))
-	if err != nil {
-		return "", fmt.Errorf("wipay build request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("Authorization", "Bearer "+account.WiPayAPIKey)
-
-	client := &http.Client{Timeout: 15 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		log.Printf("[WiPay] CreateWiPayCheckout HTTP request failed: %v", err)
-		return "", fmt.Errorf("wipay request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("wipay read response: %w", err)
-	}
-
-	log.Printf("[WiPay] raw response status=%d body_len=%d",
-		resp.StatusCode, len(respBody))
-
-	if resp.StatusCode != http.StatusOK {
-		log.Printf("[WiPay] CreateWiPayCheckout failed: HTTP %d | body: %s", resp.StatusCode, string(respBody))
-		return "", fmt.Errorf("wipay returned HTTP %d: %s", resp.StatusCode, string(respBody))
-	}
-
-	body := string(respBody)
-
-	// Try to extract the payment URL from WiPay's HTML response.
-	// WiPay embeds the actual payment page URL in the response.
-	re1 := regexp.MustCompile(`window\.location(?:\.href)?\s*=\s*["']([^"']+)["']`)
-	re2 := regexp.MustCompile(`<meta[^>]+http-equiv=["']refresh["'][^>]+url=([^"'\s>]+)`)
-	re3 := regexp.MustCompile(`<form[^>]+action=["']([^"']+)["']`)
-	re4 := regexp.MustCompile(`["']url["']\s*:\s*["'](https://[^"']+wipayfinancial[^"']+)["']`)
-
-	for _, re := range []*regexp.Regexp{re1, re2, re3, re4} {
-		if match := re.FindStringSubmatch(body); len(match) > 1 {
-			extractedURL := match[1]
-			if strings.HasPrefix(extractedURL, "https://") &&
-				strings.Contains(extractedURL, "wipay") {
-				log.Printf("[WiPay] extracted payment URL: %s", extractedURL)
-				return extractedURL, nil
-			}
-		}
-	}
-
-	// If no URL found, log the first 500 chars of the response to debug
-	preview := body
-	if len(preview) > 500 {
-		preview = preview[:500]
-	}
-	log.Printf("[WiPay] could not extract URL from response. First 500 chars: %s", preview)
-	return "", fmt.Errorf("could not extract payment URL from WiPay response")
+	return &WiPayFormData{
+		Endpoint:      wipayEndpoint(currency),
+		AccountNumber: account.WiPayAccountID,
+		AVS:           "0",
+		CountryCode:   wipayCountryCode(currency),
+		Currency:      currency,
+		Environment:   env,
+		FeeStructure:  "merchant_absorb",
+		Method:        "credit_card",
+		OrderID:       quoteToken,
+		Origin:        "QuoteFlow",
+		ResponseURL:   responseURL,
+		ReturnURL:     returnURL,
+		Total:         fmt.Sprintf("%.2f", amount),
+	}, nil
 }
+
