@@ -838,6 +838,9 @@ func (h *Handler) WiPayCheckout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// WiPay rejects order_id with underscores/dashes — store sanitized for webhook lookup
+	wipayOrderID := strings.NewReplacer("_", "", "-", "").Replace(token)
+
 	payment := &models.Payment{
 		QuoteID:            quote.ID,
 		UserID:             quote.UserID,
@@ -848,7 +851,7 @@ func (h *Handler) WiPayCheckout(w http.ResponseWriter, r *http.Request) {
 		NetAmount:          amount,
 		Currency:           quote.Currency,
 		Status:             models.PaymentStatusPending,
-		ProcessorPaymentID: token,
+		ProcessorPaymentID: wipayOrderID,
 	}
 	_ = h.db.CreatePayment(r.Context(), payment)
 

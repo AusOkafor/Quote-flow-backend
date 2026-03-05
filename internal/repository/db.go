@@ -1854,6 +1854,21 @@ func (db *DB) UpdatePaymentProcessorID(ctx context.Context, paymentID, processor
 }
 
 func (db *DB) GetPaymentByProcessorID(ctx context.Context, processorPaymentID, processor string) (*models.Payment, error) {
+	payment, err := db.getPaymentByProcessorID(ctx, processorPaymentID, processor)
+	if err == nil {
+		return payment, nil
+	}
+	// WiPay: try sanitized version (tokens with _ or - removed)
+	if processor == "wipay" {
+		sanitized := strings.NewReplacer("_", "", "-", "").Replace(processorPaymentID)
+		if sanitized != processorPaymentID {
+			return db.getPaymentByProcessorID(ctx, sanitized, processor)
+		}
+	}
+	return nil, err
+}
+
+func (db *DB) getPaymentByProcessorID(ctx context.Context, processorPaymentID, processor string) (*models.Payment, error) {
 	raw, _, err := db.client.From("payments").
 		Select("*", "exact", false).
 		Eq("processor_payment_id", processorPaymentID).
@@ -1865,8 +1880,11 @@ func (db *DB) GetPaymentByProcessorID(ctx context.Context, processorPaymentID, p
 		return nil, err
 	}
 	var rows []models.Payment
-	if err := decode(raw, &rows); err != nil || len(rows) == 0 {
+	if err := decode(raw, &rows); err != nil {
 		return nil, err
+	}
+	if len(rows) == 0 {
+		return nil, fmt.Errorf("payment not found")
 	}
 	return &rows[0], nil
 }
