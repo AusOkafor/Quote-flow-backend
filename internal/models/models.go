@@ -460,8 +460,8 @@ type PaymentAccountFull struct {
 	PaymentAccount
 	StripeAccessToken  string `json:"stripe_access_token" db:"stripe_access_token"`
 	PayPalAccessToken  string `json:"paypal_access_token" db:"paypal_access_token"`
-	WiPayAccountID     string `json:"-" db:"wipay_account_id"`
-	WiPayAPIKey        string `json:"-" db:"wipay_api_key"`
+	WiPayAccountID     string `json:"wipay_account_id,omitempty" db:"wipay_account_id"`
+	WiPayAPIKey        string `json:"wipay_api_key,omitempty" db:"wipay_api_key"`
 }
 
 type Payment struct {
