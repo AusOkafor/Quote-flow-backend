@@ -1598,7 +1598,7 @@ func (db *DB) RemoveTeamMember(ctx context.Context, teamID, userID string) error
 
 func (db *DB) ListPaymentAccounts(ctx context.Context, userID string) ([]models.PaymentAccount, error) {
 	raw, _, err := db.client.From("payment_accounts").
-		Select("id,user_id,processor,stripe_account_id,paypal_merchant_id,is_active,created_at", "exact", false).
+		Select("id,user_id,processor,wipay_account_id,stripe_account_id,paypal_merchant_id,is_active,created_at", "exact", false).
 		Eq("user_id", userID).
 		Eq("is_active", "true").
 		Execute()
@@ -1611,7 +1611,7 @@ func (db *DB) ListPaymentAccounts(ctx context.Context, userID string) ([]models.
 
 func (db *DB) GetPaymentAccount(ctx context.Context, userID, processor string) (*models.PaymentAccount, error) {
 	raw, _, err := db.client.From("payment_accounts").
-		Select("id,user_id,processor,stripe_account_id,paypal_merchant_id,is_active,created_at", "exact", false).
+		Select("id,user_id,processor,wipay_account_id,stripe_account_id,paypal_merchant_id,is_active,created_at", "exact", false).
 		Eq("user_id", userID).
 		Eq("processor", processor).
 		Eq("is_active", "true").
@@ -1661,6 +1661,16 @@ func (db *DB) GetPaymentAccountFull(ctx context.Context, userID, processor strin
 				acc.PayPalAccessToken = dec
 			}
 		}
+		if acc.WiPayAccountID != "" {
+			if dec, err := services.Decrypt(acc.WiPayAccountID, db.cfg.EncryptionKey); err == nil {
+				acc.WiPayAccountID = dec
+			}
+		}
+		if acc.WiPayAPIKey != "" {
+			if dec, err := services.Decrypt(acc.WiPayAPIKey, db.cfg.EncryptionKey); err == nil {
+				acc.WiPayAPIKey = dec
+			}
+		}
 	}
 	return acc, nil
 }
@@ -1698,44 +1708,99 @@ func (db *DB) DisconnectPaymentAccount(ctx context.Context, userID, processor st
 	return err
 }
 
-// ListPaymentProcessorsForCurrency returns processors available for the given currency.
-// Stripe supports JMD/TTD/BBD/USD; PayPal supports USD only.
-func (db *DB) ListPaymentProcessorsForCurrency(ctx context.Context, userID, currency string) []string {
-	accounts, err := db.ListPaymentAccounts(ctx, userID)
-	if err != nil || len(accounts) == 0 {
-		return nil
+// SaveWiPayAccount saves a freelancer's WiPay credentials.
+// Credentials are stored encrypted — never plaintext.
+func (db *DB) SaveWiPayAccount(ctx context.Context, userID, accountNumber, apiKey string) error {
+	if db.cfg.EncryptionKey == "" {
+		return fmt.Errorf("ENCRYPTION_KEY required for WiPay credentials")
 	}
-	var out []string
-	for _, a := range accounts {
-		if !a.IsActive {
-			continue
-		}
-		if a.Processor == models.ProcessorStripe {
-			out = append(out, string(models.ProcessorStripe))
-		} else if a.Processor == models.ProcessorPayPal && currency == "USD" {
-			out = append(out, string(models.ProcessorPayPal))
-		}
+	encAccountNumber, err := services.Encrypt(accountNumber, db.cfg.EncryptionKey)
+	if err != nil {
+		return fmt.Errorf("encrypting wipay account number: %w", err)
 	}
-	return out
+	encAPIKey, err := services.Encrypt(apiKey, db.cfg.EncryptionKey)
+	if err != nil {
+		return fmt.Errorf("encrypting wipay api key: %w", err)
+	}
+
+	data := map[string]interface{}{
+		"user_id":          userID,
+		"processor":        "wipay",
+		"wipay_account_id": encAccountNumber,
+		"wipay_api_key":    encAPIKey,
+		"is_active":        true,
+		"updated_at":       time.Now(),
+	}
+
+	_, _, err = db.client.From("payment_accounts").
+		Upsert(data, "user_id,processor", "representation", "").
+		Execute()
+	return err
 }
 
-// GetBestPaymentAccountFull returns the best account for the given currency (with credentials).
-// USD → Stripe or PayPal from profile preference; other currencies → Stripe.
+// ListPaymentProcessorsForCurrency returns processors available for the given currency.
+// JMD/TTD/BBD → WiPay only; USD → Stripe or PayPal.
+func (db *DB) ListPaymentProcessorsForCurrency(ctx context.Context, userID, currency string) []string {
+	var result []string
+
+	switch currency {
+	case "JMD", "TTD", "BBD":
+		account, err := db.GetPaymentAccountFull(ctx, userID, "wipay")
+		if err == nil && account.IsActive {
+			result = append(result, "wipay")
+		}
+	case "USD":
+		for _, proc := range []string{"stripe", "paypal"} {
+			account, err := db.GetPaymentAccountFull(ctx, userID, proc)
+			if err == nil && account.IsActive {
+				result = append(result, proc)
+			}
+		}
+	}
+
+	return result
+}
+
+// GetBestPaymentAccountFull selects the best payment processor for a given currency.
+// JMD/TTD/BBD → WiPay only; USD → Stripe or PayPal based on freelancer preference.
 func (db *DB) GetBestPaymentAccountFull(ctx context.Context, userID, currency string) (*models.PaymentAccountFull, error) {
-	profile, _ := db.GetProfile(ctx, userID)
-	pref := "stripe"
-	if profile != nil && profile.PreferredUSDProcessor != nil && *profile.PreferredUSDProcessor != "" {
-		pref = *profile.PreferredUSDProcessor
+	switch currency {
+	case "JMD", "TTD", "BBD":
+		account, err := db.GetPaymentAccountFull(ctx, userID, "wipay")
+		if err != nil || account == nil || !account.IsActive {
+			return nil, fmt.Errorf("WiPay is required for %s payments — connect your WiPay account in Settings → Payments", currency)
+		}
+		return account, nil
+
+	case "USD":
+		profile, err := db.GetProfile(ctx, userID)
+		if err != nil {
+			return nil, fmt.Errorf("could not load profile: %w", err)
+		}
+		preferred := "stripe"
+		if profile != nil && profile.PreferredUSDProcessor != nil && *profile.PreferredUSDProcessor != "" {
+			preferred = *profile.PreferredUSDProcessor
+		}
+
+		account, err := db.GetPaymentAccountFull(ctx, userID, preferred)
+		if err == nil && account != nil && account.IsActive {
+			return account, nil
+		}
+
+		fallback := "paypal"
+		if preferred == "paypal" {
+			fallback = "stripe"
+		}
+		account, err = db.GetPaymentAccountFull(ctx, userID, fallback)
+		if err == nil && account != nil && account.IsActive {
+			return account, nil
+		}
+
+		return nil, fmt.Errorf("no payment processor connected for USD — connect Stripe or PayPal in Settings → Payments")
+
+	default:
+		return nil, fmt.Errorf("online payment is not available for %s — collect payment manually", currency)
 	}
-	acc, _ := db.GetPaymentAccountFull(ctx, userID, pref)
-	if acc != nil {
-		return acc, nil
-	}
-	other := "paypal"
-	if pref == "paypal" {
-		other = "stripe"
-	}
-	return db.GetPaymentAccountFull(ctx, userID, other)
 }
 
 func (db *DB) CreatePayment(ctx context.Context, p *models.Payment) error {

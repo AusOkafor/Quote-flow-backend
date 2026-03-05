@@ -91,6 +91,7 @@ func main() {
 	// Payment webhooks (no auth, verify by signature or form)
 	r.With(apiLimiter.Limit).Post("/webhooks/stripe-payment", h.StripePaymentWebhook)
 	r.With(apiLimiter.Limit).Post("/webhooks/paypal", h.PayPalWebhook)
+	r.With(apiLimiter.Limit).Post("/webhooks/wipay", h.WiPayWebhook)
 
 	// OAuth callbacks (public — Stripe/PayPal redirect here)
 	r.With(apiLimiter.Limit).Get("/payments/connect/stripe/callback", h.StripeConnectCallback)
@@ -140,11 +141,12 @@ func main() {
 		r.Post("/billing/create-checkout-session", h.CreateCheckoutSession)
 		r.Post("/billing/portal", h.CreateBillingPortalSession)
 
-		// Payments (Stripe Connect, PayPal)
+		// Payments (Stripe Connect, PayPal, WiPay)
 		r.Route("/payments", func(r chi.Router) {
 			r.Get("/accounts", h.ListPaymentAccounts)
 			r.Post("/connect/stripe", h.ConnectStripe)
 			r.Post("/connect/paypal", h.ConnectPayPal)
+			r.Post("/connect/wipay", h.ConnectWiPay)
 			r.Delete("/disconnect/{processor}", h.DisconnectProcessor)
 			r.Post("/create-link", h.CreatePaymentLink)
 			r.Get("/history", h.ListPayments)

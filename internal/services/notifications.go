@@ -146,6 +146,7 @@ func (n *NotificationService) SendPaymentReceivedNotification(quote *models.Quot
 	processorLabel := map[string]string{
 		"stripe": "Stripe",
 		"paypal": "PayPal",
+		"wipay":  "WiPay",
 	}[string(payment.Processor)]
 	if processorLabel == "" {
 		processorLabel = string(payment.Processor)

@@ -424,6 +424,7 @@ type PaymentProcessor string
 const (
 	ProcessorStripe PaymentProcessor = "stripe"
 	ProcessorPayPal PaymentProcessor = "paypal"
+	ProcessorWiPay  PaymentProcessor = "wipay"
 )
 
 type PaymentType string
@@ -447,6 +448,7 @@ type PaymentAccount struct {
 	ID               string           `json:"id" db:"id"`
 	UserID           string           `json:"user_id" db:"user_id"`
 	Processor        PaymentProcessor `json:"processor" db:"processor"`
+	WiPayAccountID   string           `json:"wipay_account_id,omitempty" db:"wipay_account_id"`
 	StripeAccountID  string           `json:"stripe_account_id,omitempty" db:"stripe_account_id"`
 	PayPalMerchantID string           `json:"paypal_merchant_id,omitempty" db:"paypal_merchant_id"`
 	IsActive         bool             `json:"is_active" db:"is_active"`
@@ -456,8 +458,10 @@ type PaymentAccount struct {
 // PaymentAccountFull includes credentials (for internal payment service use only).
 type PaymentAccountFull struct {
 	PaymentAccount
-	StripeAccessToken string `json:"stripe_access_token" db:"stripe_access_token"`
-	PayPalAccessToken string `json:"paypal_access_token" db:"paypal_access_token"`
+	StripeAccessToken  string `json:"stripe_access_token" db:"stripe_access_token"`
+	PayPalAccessToken  string `json:"paypal_access_token" db:"paypal_access_token"`
+	WiPayAccountID     string `json:"-" db:"wipay_account_id"`
+	WiPayAPIKey        string `json:"-" db:"wipay_api_key"`
 }
 
 type Payment struct {
@@ -490,6 +494,11 @@ type PaymentLinkResponse struct {
 	Currency    string           `json:"currency"`
 	PaymentType PaymentType      `json:"payment_type"`
 	Processor   PaymentProcessor `json:"processor"`
+}
+
+type ConnectWiPayRequest struct {
+	AccountNumber string `json:"account_number" validate:"required"`
+	APIKey        string `json:"api_key" validate:"required"`
 }
 
 type ConnectPayPalRequest struct {

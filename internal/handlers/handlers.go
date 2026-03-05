@@ -473,11 +473,37 @@ func (h *Handler) PayPalConnectCallback(w http.ResponseWriter, r *http.Request) 
 	http.Redirect(w, r, h.cfg.FrontendURL+"/app/settings?tab=payments&connected=paypal", http.StatusFound)
 }
 
+// POST /payments/connect/wipay
+func (h *Handler) ConnectWiPay(w http.ResponseWriter, r *http.Request) {
+	user := currentUser(r)
+
+	var req models.ConnectWiPayRequest
+	if err := h.decode(r, &req); err != nil {
+		h.err(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if err := h.validateRequest(&req); err != nil {
+		h.err(w, http.StatusBadRequest, validationErrorMsg(err))
+		return
+	}
+
+	if err := h.db.SaveWiPayAccount(r.Context(), user.ID, req.AccountNumber, req.APIKey); err != nil {
+		h.err(w, http.StatusInternalServerError, "failed to save WiPay account")
+		return
+	}
+
+	h.ok(w, map[string]interface{}{
+		"connected": true,
+		"processor": "wipay",
+		"message":   "WiPay connected successfully",
+	})
+}
+
 // DELETE /payments/disconnect/:processor
 func (h *Handler) DisconnectProcessor(w http.ResponseWriter, r *http.Request) {
 	user := currentUser(r)
 	processor := chi.URLParam(r, "processor")
-	if processor != "stripe" && processor != "paypal" {
+	if processor != "stripe" && processor != "paypal" && processor != "wipay" {
 		h.err(w, http.StatusBadRequest, "invalid processor")
 		return
 	}
@@ -486,6 +512,16 @@ func (h *Handler) DisconnectProcessor(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.ok(w, map[string]bool{"disconnected": true})
+}
+
+// calculatePlatformFee returns the platform fee for a transaction.
+// WiPay: 0% — we cannot auto-collect fees from WiPay transactions.
+// Stripe/PayPal: 0.7% — collected automatically.
+func (h *Handler) calculatePlatformFee(amount float64, processor models.PaymentProcessor) float64 {
+	if processor == models.ProcessorWiPay {
+		return 0
+	}
+	return math.Round(amount*h.cfg.PlatformFeePercent*100) / 100
 }
 
 func calcDeposit(quote *models.QuoteWithDetails) float64 {
@@ -531,14 +567,14 @@ func (h *Handler) CreatePaymentLink(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	platformFee := math.Round(amount*h.cfg.PlatformFeePercent*100) / 100
-	netAmount := amount - platformFee
-
 	account, err := h.db.GetBestPaymentAccountFull(r.Context(), user.ID, quote.Currency)
 	if err != nil || account == nil {
-		h.err(w, http.StatusBadRequest, "no payment processor connected for "+quote.Currency+" quotes. Connect Stripe or PayPal in Settings.")
+		h.err(w, http.StatusBadRequest, err.Error())
 		return
 	}
+
+	platformFee := h.calculatePlatformFee(amount, account.Processor)
+	netAmount := amount - platformFee
 
 	var paymentURL, processorPaymentID string
 
@@ -557,6 +593,13 @@ func (h *Handler) CreatePaymentLink(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		paymentURL, processorPaymentID = link.ApproveURL, link.OrderID
+	case models.ProcessorWiPay:
+		paymentURL, err = h.payments.CreateWiPayLink(account, amount, quote.Currency, quote.ShareToken)
+		if err != nil {
+			h.err(w, http.StatusInternalServerError, "WiPay error: "+err.Error())
+			return
+		}
+		processorPaymentID = quote.ShareToken
 	default:
 		h.err(w, http.StatusBadRequest, "unsupported processor")
 		return
@@ -636,7 +679,7 @@ func (h *Handler) PublicCreatePaymentLink(w http.ResponseWriter, r *http.Request
 	var account *models.PaymentAccountFull
 	if req.Processor != "" {
 		proc := models.PaymentProcessor(req.Processor)
-		if proc != models.ProcessorStripe && proc != models.ProcessorPayPal {
+		if proc != models.ProcessorStripe && proc != models.ProcessorPayPal && proc != models.ProcessorWiPay {
 			h.err(w, http.StatusBadRequest, "invalid processor")
 			return
 		}
@@ -645,15 +688,19 @@ func (h *Handler) PublicCreatePaymentLink(w http.ResponseWriter, r *http.Request
 			h.err(w, http.StatusBadRequest, "processor not connected")
 			return
 		}
-		// Currency check: PayPal only for USD
+		// Currency checks
 		if proc == models.ProcessorPayPal && quote.Currency != "USD" {
 			h.err(w, http.StatusBadRequest, "PayPal only supports USD")
+			return
+		}
+		if proc == models.ProcessorWiPay && quote.Currency != "JMD" && quote.Currency != "TTD" && quote.Currency != "BBD" {
+			h.err(w, http.StatusBadRequest, "WiPay only supports JMD, TTD, and BBD")
 			return
 		}
 	} else {
 		account, err = h.db.GetBestPaymentAccountFull(r.Context(), userID, quote.Currency)
 		if err != nil || account == nil {
-			h.err(w, http.StatusBadRequest, "no payment processor connected. Ask the freelancer to connect a processor in Settings.")
+			h.err(w, http.StatusBadRequest, err.Error())
 			return
 		}
 	}
@@ -673,7 +720,7 @@ func (h *Handler) PublicCreatePaymentLink(w http.ResponseWriter, r *http.Request
 		}
 	}
 
-	platformFee := math.Round(amount*h.cfg.PlatformFeePercent*100) / 100
+	platformFee := h.calculatePlatformFee(amount, account.Processor)
 	netAmount := amount - platformFee
 
 	var paymentURL, processorPaymentID string
@@ -693,6 +740,13 @@ func (h *Handler) PublicCreatePaymentLink(w http.ResponseWriter, r *http.Request
 			return
 		}
 		paymentURL, processorPaymentID = link.ApproveURL, link.OrderID
+	case models.ProcessorWiPay:
+		paymentURL, err = h.payments.CreateWiPayLink(account, amount, quote.Currency, quote.ShareToken)
+		if err != nil {
+			h.err(w, http.StatusInternalServerError, "payment link failed")
+			return
+		}
+		processorPaymentID = quote.ShareToken
 	default:
 		h.err(w, http.StatusBadRequest, "unsupported processor")
 		return
@@ -1048,6 +1102,40 @@ func (h *Handler) PayPalWebhook(w http.ResponseWriter, r *http.Request) {
 			h.handlePaymentConfirmed(r.Context(), payment.QuoteID, payment.PaymentType)
 		}
 	}
+	w.WriteHeader(http.StatusOK)
+}
+
+// POST /webhooks/wipay — WiPay payment webhook (form data)
+func (h *Handler) WiPayWebhook(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	status := r.FormValue("status")
+	orderID := r.FormValue("order_id")
+
+	log.Printf("[WiPay] webhook: status=%s order_id=%s", status, orderID)
+
+	if status != "paid" {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	if orderID == "" {
+		log.Printf("[WiPay] webhook: missing order_id")
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	payment, err := h.db.GetPaymentByProcessorID(r.Context(), orderID, "wipay")
+	if err != nil || payment == nil {
+		log.Printf("[WiPay] webhook: payment not found for order_id=%s: %v", orderID, err)
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	h.handlePaymentConfirmed(r.Context(), payment.QuoteID, payment.PaymentType)
 	w.WriteHeader(http.StatusOK)
 }
 

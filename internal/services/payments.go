@@ -2,6 +2,9 @@ package services
 
 import (
 	"bytes"
+	"crypto/hmac"
+	"crypto/sha512"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -396,4 +399,95 @@ func (p *PaymentService) getPayPalPlatformToken() (string, error) {
 		return "", fmt.Errorf("PayPal: no access token in response")
 	}
 	return result.AccessToken, nil
+}
+
+// ── WIPAY ────────────────────────────────────────────────────────────────────
+
+// CreateWiPayLink generates a WiPay payment URL for the given quote.
+// NOTE: No platform fee is applied to WiPay transactions.
+// The full payment amount goes directly to the freelancer's WiPay account.
+func (p *PaymentService) CreateWiPayLink(
+	account *models.PaymentAccountFull,
+	amount float64,
+	currency string,
+	quoteToken string,
+) (string, error) {
+	if p.cfg.WiPayAPIURL == "" {
+		return "", fmt.Errorf("WiPay not configured")
+	}
+	if account.WiPayAccountID == "" || account.WiPayAPIKey == "" {
+		return "", fmt.Errorf("WiPay account not connected")
+	}
+
+	countryCode := wipayCountryCode(currency)
+	hashInput := fmt.Sprintf("%s%s%.2f%s",
+		account.WiPayAccountID,
+		quoteToken,
+		amount,
+		countryCode,
+	)
+	mac := hmac.New(sha512.New, []byte(account.WiPayAPIKey))
+	mac.Write([]byte(hashInput))
+	hash := hex.EncodeToString(mac.Sum(nil))
+
+	responseURL := strings.TrimSuffix(p.cfg.AppURL, "/") + "/webhooks/wipay"
+	returnURL := strings.TrimSuffix(p.cfg.FrontendURL, "/") + "/payment/complete?quote=" + url.QueryEscape(quoteToken)
+
+	payload := map[string]interface{}{
+		"account_number": account.WiPayAccountID,
+		"avs":            0,
+		"currency":       countryCode,
+		"environment":    p.cfg.WiPayEnvironment,
+		"fee_structure":  "merchant_absorb",
+		"hash":           hash,
+		"order_id":       quoteToken,
+		"origin":         p.cfg.AppURL,
+		"response_url":   responseURL,
+		"return_url":     returnURL,
+		"total":          fmt.Sprintf("%.2f", amount),
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return "", fmt.Errorf("wipay marshal: %w", err)
+	}
+
+	req, err := http.NewRequest("POST", p.cfg.WiPayAPIURL+"/process", bytes.NewReader(body))
+	if err != nil {
+		return "", fmt.Errorf("wipay request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("wipay call failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		URL   string `json:"url"`
+		Error string `json:"error"`
+	}
+	_ = json.NewDecoder(resp.Body).Decode(&result)
+
+	if result.Error != "" {
+		return "", fmt.Errorf("wipay error: %s", result.Error)
+	}
+	if result.URL == "" {
+		return "", fmt.Errorf("wipay returned no payment URL")
+	}
+	return result.URL, nil
+}
+
+// wipayCountryCode maps currency code to WiPay's country code parameter.
+func wipayCountryCode(currency string) string {
+	switch currency {
+	case "TTD":
+		return "TT"
+	case "BBD":
+		return "BB"
+	default:
+		return "JM" // JMD and USD both use JM as default
+	}
 }
