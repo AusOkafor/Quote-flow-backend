@@ -27,6 +27,8 @@ func main() {
 	if err != nil {
 		log.Fatalf("config: %v", err)
 	}
+	log.Printf("[Config] WIPAY_ENVIRONMENT=%s", cfg.WiPayEnvironment)
+	log.Printf("[Config] WIPAY_API_URL=%s", cfg.WiPayAPIURL)
 
 	// ── Dependencies ─────────────────────────────────────────
 	db, err := repository.New(cfg)

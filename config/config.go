@@ -77,8 +77,11 @@ type Config struct {
 
 // Load reads .env file (if present) and populates Config from environment variables.
 func Load() (*Config, error) {
-	// Load .env file — ignore error in production (vars already set)
-	_ = godotenv.Load()
+	// Load .env only in development — in production (Render) use platform env vars
+	// so a committed .env never overrides WIPAY_ENVIRONMENT, etc.
+	if os.Getenv("ENV") != "production" {
+		_ = godotenv.Load()
+	}
 
 	cfg := &Config{
 		Port:                    getEnv("PORT", "8081"),
