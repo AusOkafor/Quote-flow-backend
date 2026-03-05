@@ -930,6 +930,16 @@ func (h *Handler) WiPayCheckout(w http.ResponseWriter, r *http.Request) {
 		html.EscapeString(formData.Total),
 	)
 
+	// Set cookie so /app can redirect to correct quote when WiPay sends user back
+	http.SetCookie(w, &http.Cookie{
+		Name:     "wipay_quote_token",
+		Value:    token,
+		Path:     "/",
+		MaxAge:   600,
+		SameSite: http.SameSiteNoneMode,
+		Secure:   true,
+	})
+
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte(html))
@@ -1268,20 +1278,24 @@ func verifyWiPayHash(transactionID, apiKey, receivedHash string) bool {
 }
 
 // GET /app — WiPay redirects here after payment (ignores return_url).
-// If order_id in query, look up payment and redirect to quote page.
+// Read cookie set in WiPayCheckout to know which quote to redirect to.
 func (h *Handler) WiPayAppRedirect(w http.ResponseWriter, r *http.Request) {
-	orderID := r.URL.Query().Get("order_id")
-	if orderID != "" {
-		payment, err := h.db.GetPaymentByProcessorID(r.Context(), orderID, "wipay")
-		if err == nil && payment != nil {
-			quote, err := h.db.GetQuoteByID(r.Context(), payment.QuoteID)
-			if err == nil && quote != nil && quote.ShareToken != "" {
-				redirectURL := strings.TrimSuffix(h.cfg.FrontendURL, "/") + "/q/" + quote.ShareToken
-				log.Printf("[WiPay] /app redirect: order_id=%s -> %s", orderID, redirectURL)
-				http.Redirect(w, r, redirectURL, http.StatusFound)
-				return
-			}
-		}
+	cookie, err := r.Cookie("wipay_quote_token")
+	if err == nil && cookie.Value != "" {
+		// Clear the cookie
+		http.SetCookie(w, &http.Cookie{
+			Name:     "wipay_quote_token",
+			Value:    "",
+			Path:     "/",
+			MaxAge:   -1,
+			SameSite: http.SameSiteNoneMode,
+			Secure:   true,
+		})
+		redirectURL := fmt.Sprintf("%s/q/%s?payment=success&processor=wipay",
+			strings.TrimSuffix(h.cfg.FrontendURL, "/"), cookie.Value)
+		log.Printf("[WiPay] /app redirect: cookie -> %s", redirectURL)
+		http.Redirect(w, r, redirectURL, http.StatusFound)
+		return
 	}
 	// Fallback — redirect to frontend home
 	http.Redirect(w, r, strings.TrimSuffix(h.cfg.FrontendURL, "/"), http.StatusFound)
