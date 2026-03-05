@@ -452,8 +452,12 @@ func (p *PaymentService) CreateWiPayLink(
 	endpoint := wipayEndpoint(currency)
 	countryCode := wipayCountryCode(currency)
 
+	env := p.cfg.WiPayEnvironment
+	if env == "" {
+		env = "sandbox"
+	}
 	log.Printf("[WiPay] CreateWiPayLink: amount=%.2f currency=%s countryCode=%s order_id=%s env=%s endpoint=%s",
-		amount, currency, countryCode, quoteToken, p.cfg.WiPayEnvironment, endpoint)
+		amount, currency, countryCode, quoteToken, env, endpoint)
 
 	responseURL := strings.TrimSuffix(p.cfg.AppURL, "/") + "/webhooks/wipay"
 	returnURL := strings.TrimSuffix(p.cfg.FrontendURL, "/") + "/payment/complete?quote=" + url.QueryEscape(quoteToken)
@@ -464,7 +468,7 @@ func (p *PaymentService) CreateWiPayLink(
 	formData.Set("avs", "0")
 	formData.Set("country_code", countryCode)
 	formData.Set("currency", currency)
-	formData.Set("environment", p.cfg.WiPayEnvironment)
+	formData.Set("environment", env)
 	formData.Set("fee_structure", "merchant_absorb")
 	formData.Set("method", "credit_card")
 	formData.Set("order_id", quoteToken)
@@ -488,11 +492,21 @@ func (p *PaymentService) CreateWiPayLink(
 	}
 	defer resp.Body.Close()
 
-	respBody, _ := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("wipay read response: %w", err)
+	}
 
 	if resp.StatusCode != http.StatusOK {
 		log.Printf("[WiPay] CreateWiPayLink failed: HTTP %d | raw: %s", resp.StatusCode, string(respBody))
 		return "", fmt.Errorf("wipay returned HTTP %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	// Detect HTML error response (WiPay returns HTML instead of JSON on errors)
+	bodyStr := string(respBody)
+	if strings.Contains(bodyStr, "<html") || strings.Contains(bodyStr, "<!DOCTYPE") {
+		log.Printf("[WiPay] CreateWiPayLink received HTML instead of JSON — check environment setting")
+		return "", fmt.Errorf("wipay returned an HTML error page — check environment setting")
 	}
 
 	var result struct {
@@ -500,8 +514,12 @@ func (p *PaymentService) CreateWiPayLink(
 		Message string `json:"message"`
 	}
 	if err := json.Unmarshal(respBody, &result); err != nil {
-		log.Printf("[WiPay] CreateWiPayLink response decode failed: %v | raw: %s", err, string(respBody))
-		return "", fmt.Errorf("wipay response decode: %w", err)
+		preview := bodyStr
+		if len(preview) > 200 {
+			preview = preview[:200]
+		}
+		log.Printf("[WiPay] CreateWiPayLink response decode failed: %v | raw: %s", err, bodyStr)
+		return "", fmt.Errorf("wipay response decode: %w — body: %s", err, preview)
 	}
 
 	if result.URL == "" {
