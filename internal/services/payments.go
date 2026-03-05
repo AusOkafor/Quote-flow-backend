@@ -476,6 +476,11 @@ func (p *PaymentService) GetWiPayFormData(
 	// WiPay rejects order_id with underscores or dashes — sanitize for form
 	wipayOrderID := strings.NewReplacer("_", "", "-", "").Replace(quoteToken)
 
+	// WiPay uses origin as base for redirect and appends /app — set to quote URL
+	// Frontend /q/:token/app route redirects to /q/:token
+	origin := fmt.Sprintf("%s/q/%s",
+		strings.TrimSuffix(p.cfg.FrontendURL, "/"), quoteToken)
+
 	return &WiPayFormData{
 		Endpoint:      wipayEndpoint(currency),
 		AccountNumber: account.WiPayAccountID,
@@ -486,7 +491,7 @@ func (p *PaymentService) GetWiPayFormData(
 		FeeStructure:  "merchant_absorb",
 		Method:        "credit_card",
 		OrderID:       wipayOrderID,
-		Origin:        "QuoteFlow",
+		Origin:        origin,
 		ResponseURL:   responseURL,
 		ReturnURL:     returnURL,
 		Total:         fmt.Sprintf("%.2f", amount),
