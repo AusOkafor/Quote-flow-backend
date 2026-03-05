@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
@@ -429,13 +430,14 @@ func wipayCountryCode(currency string) string {
 	}
 }
 
-// CreateWiPayCheckout POSTs to WiPay and returns the raw HTML response.
-// WiPay returns the full payment page HTML directly — we proxy it to the client.
+// CreateWiPayCheckout POSTs to WiPay and extracts the payment page URL from the HTML response.
+// WiPay embeds the redirect URL in the response — we extract it and redirect the user directly.
+// This avoids CORS issues; the user pays on WiPay's domain.
 //
 // Flow:
 //  1. We POST form fields to the country-specific WiPay endpoint
-//  2. WiPay responds with the payment page HTML (not JSON)
-//  3. We return that HTML; frontend displays it in-page or redirects
+//  2. WiPay responds with HTML containing the payment page URL
+//  3. We extract the URL and return it; handler redirects the user
 //  4. After payment, WiPay redirects to return_url and POSTs to response_url (webhook)
 //
 // Platform fee: NONE — 0% for WiPay.
@@ -515,7 +517,31 @@ func (p *PaymentService) CreateWiPayCheckout(
 		return "", fmt.Errorf("wipay returned HTTP %d: %s", resp.StatusCode, string(respBody))
 	}
 
-	// WiPay returns the full payment page HTML — return it as-is
-	log.Printf("[WiPay] CreateWiPayCheckout success: returning HTML (%d bytes)", len(respBody))
-	return string(respBody), nil
+	body := string(respBody)
+
+	// Try to extract the payment URL from WiPay's HTML response.
+	// WiPay embeds the actual payment page URL in the response.
+	re1 := regexp.MustCompile(`window\.location(?:\.href)?\s*=\s*["']([^"']+)["']`)
+	re2 := regexp.MustCompile(`<meta[^>]+http-equiv=["']refresh["'][^>]+url=([^"'\s>]+)`)
+	re3 := regexp.MustCompile(`<form[^>]+action=["']([^"']+)["']`)
+	re4 := regexp.MustCompile(`["']url["']\s*:\s*["'](https://[^"']+wipayfinancial[^"']+)["']`)
+
+	for _, re := range []*regexp.Regexp{re1, re2, re3, re4} {
+		if match := re.FindStringSubmatch(body); len(match) > 1 {
+			extractedURL := match[1]
+			if strings.HasPrefix(extractedURL, "https://") &&
+				strings.Contains(extractedURL, "wipay") {
+				log.Printf("[WiPay] extracted payment URL: %s", extractedURL)
+				return extractedURL, nil
+			}
+		}
+	}
+
+	// If no URL found, log the first 500 chars of the response to debug
+	preview := body
+	if len(preview) > 500 {
+		preview = preview[:500]
+	}
+	log.Printf("[WiPay] could not extract URL from response. First 500 chars: %s", preview)
+	return "", fmt.Errorf("could not extract payment URL from WiPay response")
 }
