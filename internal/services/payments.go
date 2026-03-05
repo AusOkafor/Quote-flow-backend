@@ -465,7 +465,9 @@ func (p *PaymentService) GetWiPayFormData(
 	}
 
 	responseURL := strings.TrimSuffix(p.cfg.AppURL, "/") + "/webhooks/wipay"
-	returnURL := strings.TrimSuffix(p.cfg.FrontendURL, "/") + "/payment/complete?quote=" + url.QueryEscape(quoteToken)
+	// Same pattern as Stripe/PayPal: redirect to quote page with success param
+	returnURL := fmt.Sprintf("%s/q/%s?payment=success&processor=wipay",
+		strings.TrimSuffix(p.cfg.FrontendURL, "/"), url.PathEscape(quoteToken))
 
 	return &WiPayFormData{
 		Endpoint:      wipayEndpoint(currency),
