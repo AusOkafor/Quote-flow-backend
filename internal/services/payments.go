@@ -465,9 +465,8 @@ func (p *PaymentService) GetWiPayFormData(
 	}
 
 	responseURL := strings.TrimSuffix(p.cfg.AppURL, "/") + "/webhooks/wipay"
-	// return_url: html.EscapeString in handler encodes & → &amp; so form submits full URL
-	returnURL := fmt.Sprintf("%s/q/%s?payment=success&processor=wipay",
-		strings.TrimSuffix(p.cfg.FrontendURL, "/"), quoteToken)
+	// WiPay ignores return_url and redirects to {APP_URL}/app — use our /app handler
+	returnURL := strings.TrimSuffix(p.cfg.AppURL, "/") + "/app"
 
 	log.Printf("[WiPay] GetWiPayFormData: FrontendURL=%s AppURL=%s ReturnURL=%s",
 		p.cfg.FrontendURL, p.cfg.AppURL, returnURL)

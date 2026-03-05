@@ -99,6 +99,9 @@ func main() {
 	r.With(apiLimiter.Limit).Get("/payments/connect/stripe/callback", h.StripeConnectCallback)
 	r.With(apiLimiter.Limit).Get("/payments/connect/paypal/callback", h.PayPalConnectCallback)
 
+	// WiPay redirect — WiPay sends users to {APP_URL}/app after payment
+	r.With(publicLimiter.Limit).Get("/app", h.WiPayAppRedirect)
+
 	// Public quote viewer — clients open these from WhatsApp/email links
 	r.Route("/q/{token}", func(r chi.Router) {
 		r.Use(publicLimiter.Limit)

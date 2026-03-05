@@ -1267,6 +1267,26 @@ func verifyWiPayHash(transactionID, apiKey, receivedHash string) bool {
 	return strings.EqualFold(expected, receivedHash)
 }
 
+// GET /app — WiPay redirects here after payment (ignores return_url).
+// If order_id in query, look up payment and redirect to quote page.
+func (h *Handler) WiPayAppRedirect(w http.ResponseWriter, r *http.Request) {
+	orderID := r.URL.Query().Get("order_id")
+	if orderID != "" {
+		payment, err := h.db.GetPaymentByProcessorID(r.Context(), orderID, "wipay")
+		if err == nil && payment != nil {
+			quote, err := h.db.GetQuoteByID(r.Context(), payment.QuoteID)
+			if err == nil && quote != nil && quote.ShareToken != "" {
+				redirectURL := strings.TrimSuffix(h.cfg.FrontendURL, "/") + "/q/" + quote.ShareToken
+				log.Printf("[WiPay] /app redirect: order_id=%s -> %s", orderID, redirectURL)
+				http.Redirect(w, r, redirectURL, http.StatusFound)
+				return
+			}
+		}
+	}
+	// Fallback — redirect to frontend home
+	http.Redirect(w, r, strings.TrimSuffix(h.cfg.FrontendURL, "/"), http.StatusFound)
+}
+
 // GET /webhooks/wipay — WiPay sends webhook as GET with query string parameters.
 // Public endpoint — no JWT. Verified via MD5 hash instead.
 func (h *Handler) WiPayWebhook(w http.ResponseWriter, r *http.Request) {
