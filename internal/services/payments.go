@@ -465,9 +465,8 @@ func (p *PaymentService) GetWiPayFormData(
 	}
 
 	responseURL := strings.TrimSuffix(p.cfg.AppURL, "/") + "/webhooks/wipay"
-	// return_url: no query params — & would be treated as form field separator by WiPay
-	// Quote page shows paid status from backend; ?payment=success not needed
-	returnURL := fmt.Sprintf("%s/q/%s",
+	// return_url: html.EscapeString in handler encodes & → &amp; so form submits full URL
+	returnURL := fmt.Sprintf("%s/q/%s?payment=success&processor=wipay",
 		strings.TrimSuffix(p.cfg.FrontendURL, "/"), quoteToken)
 
 	log.Printf("[WiPay] GetWiPayFormData: FrontendURL=%s AppURL=%s ReturnURL=%s",
@@ -476,11 +475,7 @@ func (p *PaymentService) GetWiPayFormData(
 	// WiPay rejects order_id with underscores or dashes — sanitize for form
 	wipayOrderID := strings.NewReplacer("_", "", "-", "").Replace(quoteToken)
 
-	// WiPay uses origin as base for redirect and appends /app — set to quote URL
-	// Frontend /q/:token/app route redirects to /q/:token
-	origin := fmt.Sprintf("%s/q/%s",
-		strings.TrimSuffix(p.cfg.FrontendURL, "/"), quoteToken)
-
+	// WiPay only allows letters, numbers, dashes, underscores in origin — use identifier
 	return &WiPayFormData{
 		Endpoint:      wipayEndpoint(currency),
 		AccountNumber: account.WiPayAccountID,
@@ -491,7 +486,7 @@ func (p *PaymentService) GetWiPayFormData(
 		FeeStructure:  "merchant_absorb",
 		Method:        "credit_card",
 		OrderID:       wipayOrderID,
-		Origin:        origin,
+		Origin:        "QuoteFlow",
 		ResponseURL:   responseURL,
 		ReturnURL:     returnURL,
 		Total:         fmt.Sprintf("%.2f", amount),
