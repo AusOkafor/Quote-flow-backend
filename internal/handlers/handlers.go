@@ -3,6 +3,7 @@ package handlers
 import (
 	"bytes"
 	"context"
+	"crypto/md5"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -698,8 +699,8 @@ func (h *Handler) PublicCreatePaymentLink(w http.ResponseWriter, r *http.Request
 			h.err(w, http.StatusBadRequest, "PayPal only supports USD")
 			return
 		}
-		if proc == models.ProcessorWiPay && quote.Currency != "JMD" && quote.Currency != "TTD" && quote.Currency != "BBD" {
-			h.err(w, http.StatusBadRequest, "WiPay only supports JMD, TTD, and BBD")
+		if proc == models.ProcessorWiPay && quote.Currency != "JMD" && quote.Currency != "TTD" && quote.Currency != "BBD" && quote.Currency != "GYD" {
+			h.err(w, http.StatusBadRequest, "WiPay only supports JMD, TTD, BBD, and GYD")
 			return
 		}
 	} else {
@@ -1115,19 +1116,32 @@ func (h *Handler) PayPalWebhook(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
-// POST /webhooks/wipay — WiPay payment webhook (form data)
+// verifyWiPayHash verifies the MD5 hash WiPay sends in the webhook response.
+// WiPay docs: message = MD5(transaction_id + api_key)
+func verifyWiPayHash(transactionID, apiKey, receivedHash string) bool {
+	hash := md5.Sum([]byte(transactionID + apiKey))
+	expected := fmt.Sprintf("%x", hash)
+	return strings.EqualFold(expected, receivedHash)
+}
+
+// POST /webhooks/wipay — WiPay POSTs form data here after a payment completes.
+// Public endpoint — no JWT. Verified via MD5 hash instead.
 func (h *Handler) WiPayWebhook(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
+		log.Printf("[WiPay] webhook: failed to parse form: %v", err)
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
 
 	status := r.FormValue("status")
 	orderID := r.FormValue("order_id")
+	transactionID := r.FormValue("transaction_id")
+	message := r.FormValue("message")
 
-	log.Printf("[WiPay] webhook: status=%s order_id=%s", status, orderID)
+	log.Printf("[WiPay] webhook received: status=%s order_id=%s transaction_id=%s", status, orderID, transactionID)
 
-	if status != "paid" {
+	if status != "success" {
+		log.Printf("[WiPay] webhook: non-success status=%s for order_id=%s — ignoring", status, orderID)
 		w.WriteHeader(http.StatusOK)
 		return
 	}
@@ -1145,7 +1159,30 @@ func (h *Handler) WiPayWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Verify hash — confirms webhook is genuinely from WiPay
+	if transactionID != "" && message != "" {
+		account, err := h.db.GetPaymentAccountFull(r.Context(), payment.UserID, "wipay")
+		if err != nil {
+			log.Printf("[WiPay] webhook: could not load account for hash verification: %v", err)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+
+		// GetPaymentAccountFull returns decrypted credentials
+		if !verifyWiPayHash(transactionID, account.WiPayAPIKey, message) {
+			log.Printf("[WiPay] webhook: hash verification FAILED for order_id=%s — possible spoofed request", orderID)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		log.Printf("[WiPay] webhook: hash verified OK for order_id=%s", orderID)
+	}
+
+	if transactionID != "" {
+		_ = h.db.UpdatePaymentProcessorID(r.Context(), payment.ID, transactionID)
+	}
+
 	h.handlePaymentConfirmed(r.Context(), payment.QuoteID, payment.PaymentType)
+	log.Printf("[WiPay] webhook: payment confirmed for order_id=%s transaction_id=%s", orderID, transactionID)
 	w.WriteHeader(http.StatusOK)
 }
 

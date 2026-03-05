@@ -2,9 +2,6 @@ package services
 
 import (
 	"bytes"
-	"crypto/hmac"
-	"crypto/sha512"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -403,108 +400,114 @@ func (p *PaymentService) getPayPalPlatformToken() (string, error) {
 
 // ── WIPAY ────────────────────────────────────────────────────────────────────
 
-// CreateWiPayLink generates a WiPay payment URL for the given quote.
-// NOTE: No platform fee is applied to WiPay transactions.
-// The full payment amount goes directly to the freelancer's WiPay account.
-func (p *PaymentService) CreateWiPayLink(
-	account *models.PaymentAccountFull,
-	amount float64,
-	currency string,
-	quoteToken string,
-) (string, error) {
-	if p.cfg.WiPayAPIURL == "" {
-		log.Printf("[WiPay] CreateWiPayLink failed: WiPay not configured (WIPAY_API_URL empty)")
-		return "", fmt.Errorf("WiPay not configured")
+// wipayEndpoint returns the correct WiPay API URL for the given currency.
+// Each Caribbean country has its own dedicated WiPay endpoint.
+func wipayEndpoint(currency string) string {
+	switch currency {
+	case "TTD":
+		return "https://tt.wipayfinancial.com/plugins/payments/request"
+	case "BBD":
+		return "https://bb.wipayfinancial.com/plugins/payments/request"
+	case "GYD":
+		return "https://gy.wipayfinancial.com/plugins/payments/request"
+	default:
+		return "https://jm.wipayfinancial.com/plugins/payments/request" // JMD
 	}
-	if account.WiPayAccountID == "" || account.WiPayAPIKey == "" {
-		log.Printf("[WiPay] CreateWiPayLink failed: WiPay account not connected (missing account_number or api_key)")
-		return "", fmt.Errorf("WiPay account not connected")
-	}
-
-	countryCode := wipayCountryCode(currency)
-	log.Printf("[WiPay] CreateWiPayLink: amount=%.2f currency=%s countryCode=%s order_id=%s env=%s",
-		amount, currency, countryCode, quoteToken, p.cfg.WiPayEnvironment)
-	hashInput := fmt.Sprintf("%s%s%.2f%s",
-		account.WiPayAccountID,
-		quoteToken,
-		amount,
-		countryCode,
-	)
-	mac := hmac.New(sha512.New, []byte(account.WiPayAPIKey))
-	mac.Write([]byte(hashInput))
-	hash := hex.EncodeToString(mac.Sum(nil))
-
-	responseURL := strings.TrimSuffix(p.cfg.AppURL, "/") + "/webhooks/wipay"
-	returnURL := strings.TrimSuffix(p.cfg.FrontendURL, "/") + "/payment/complete?quote=" + url.QueryEscape(quoteToken)
-
-	payload := map[string]interface{}{
-		"account_number": account.WiPayAccountID,
-		"avs":            0,
-		"currency":       countryCode,
-		"environment":    p.cfg.WiPayEnvironment,
-		"fee_structure":  "merchant_absorb",
-		"hash":           hash,
-		"order_id":       quoteToken,
-		"origin":         p.cfg.AppURL,
-		"response_url":   responseURL,
-		"return_url":     returnURL,
-		"total":          fmt.Sprintf("%.2f", amount),
-	}
-
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return "", fmt.Errorf("wipay marshal: %w", err)
-	}
-
-	req, err := http.NewRequest("POST", p.cfg.WiPayAPIURL+"/process", bytes.NewReader(body))
-	if err != nil {
-		return "", fmt.Errorf("wipay request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	client := &http.Client{Timeout: 15 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		log.Printf("[WiPay] CreateWiPayLink HTTP request failed: %v", err)
-		return "", fmt.Errorf("wipay call failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	respBody, _ := io.ReadAll(resp.Body)
-	var result struct {
-		URL   string `json:"url"`
-		Error string `json:"error"`
-	}
-	_ = json.Unmarshal(respBody, &result)
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		log.Printf("[WiPay] CreateWiPayLink failed: HTTP %d | raw: %s", resp.StatusCode, string(respBody))
-		if result.Error != "" {
-			return "", fmt.Errorf("wipay error: %s", result.Error)
-		}
-		return "", fmt.Errorf("wipay API returned HTTP %d", resp.StatusCode)
-	}
-
-	if result.Error != "" {
-		log.Printf("[WiPay] CreateWiPayLink WiPay API error: %s | raw: %s", result.Error, string(respBody))
-		return "", fmt.Errorf("wipay error: %s", result.Error)
-	}
-	if result.URL == "" {
-		log.Printf("[WiPay] CreateWiPayLink no URL in response: %s", string(respBody))
-		return "", fmt.Errorf("wipay returned no payment URL")
-	}
-	log.Printf("[WiPay] CreateWiPayLink success: URL received")
-	return result.URL, nil
 }
 
-// wipayCountryCode maps currency code to WiPay's country code parameter.
+// wipayCountryCode maps currency to WiPay's country_code parameter.
 func wipayCountryCode(currency string) string {
 	switch currency {
 	case "TTD":
 		return "TT"
 	case "BBD":
 		return "BB"
+	case "GYD":
+		return "GY"
 	default:
-		return "JM" // JMD and USD both use JM as default
+		return "JM" // JMD
 	}
+}
+
+// CreateWiPayLink generates a WiPay payment URL for the given quote.
+//
+// How it works:
+//  1. We POST form fields to the country-specific WiPay endpoint
+//  2. WiPay responds with a JSON object containing a payment URL
+//  3. We redirect the client to that URL to complete payment
+//  4. After payment, WiPay redirects to return_url and POSTs to response_url
+//
+// Platform fee: NONE — 0% for WiPay. Full amount goes to the freelancer.
+func (p *PaymentService) CreateWiPayLink(
+	account *models.PaymentAccountFull,
+	amount float64,
+	currency string,
+	quoteToken string,
+) (string, error) {
+	if account.WiPayAccountID == "" || account.WiPayAPIKey == "" {
+		log.Printf("[WiPay] CreateWiPayLink failed: WiPay account not connected (missing account_number or api_key)")
+		return "", fmt.Errorf("WiPay account not connected")
+	}
+
+	endpoint := wipayEndpoint(currency)
+	countryCode := wipayCountryCode(currency)
+
+	log.Printf("[WiPay] CreateWiPayLink: amount=%.2f currency=%s countryCode=%s order_id=%s env=%s endpoint=%s",
+		amount, currency, countryCode, quoteToken, p.cfg.WiPayEnvironment, endpoint)
+
+	responseURL := strings.TrimSuffix(p.cfg.AppURL, "/") + "/webhooks/wipay"
+	returnURL := strings.TrimSuffix(p.cfg.FrontendURL, "/") + "/payment/complete?quote=" + url.QueryEscape(quoteToken)
+
+	// WiPay expects application/x-www-form-urlencoded (form POST, not JSON)
+	formData := url.Values{}
+	formData.Set("account_number", account.WiPayAccountID)
+	formData.Set("avs", "0")
+	formData.Set("country_code", countryCode)
+	formData.Set("currency", currency)
+	formData.Set("environment", p.cfg.WiPayEnvironment)
+	formData.Set("fee_structure", "merchant_absorb")
+	formData.Set("method", "credit_card")
+	formData.Set("order_id", quoteToken)
+	formData.Set("origin", "QuoteFlow")
+	formData.Set("response_url", responseURL)
+	formData.Set("return_url", returnURL)
+	formData.Set("total", fmt.Sprintf("%.2f", amount))
+
+	req, err := http.NewRequest("POST", endpoint, strings.NewReader(formData.Encode()))
+	if err != nil {
+		return "", fmt.Errorf("wipay build request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Authorization", "Bearer "+account.WiPayAPIKey)
+
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("[WiPay] CreateWiPayLink HTTP request failed: %v", err)
+		return "", fmt.Errorf("wipay request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("[WiPay] CreateWiPayLink failed: HTTP %d | raw: %s", resp.StatusCode, string(respBody))
+		return "", fmt.Errorf("wipay returned HTTP %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var result struct {
+		URL     string `json:"url"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		log.Printf("[WiPay] CreateWiPayLink response decode failed: %v | raw: %s", err, string(respBody))
+		return "", fmt.Errorf("wipay response decode: %w", err)
+	}
+
+	if result.URL == "" {
+		log.Printf("[WiPay] CreateWiPayLink no URL in response: %s", string(respBody))
+		return "", fmt.Errorf("wipay returned no payment URL — message: %s", result.Message)
+	}
+	log.Printf("[WiPay] CreateWiPayLink success: URL received")
+	return result.URL, nil
 }

@@ -1753,7 +1753,7 @@ func (db *DB) ListPaymentProcessorsForCurrency(ctx context.Context, userID, curr
 	var result []string
 
 	switch currency {
-	case "JMD", "TTD", "BBD":
+	case "JMD", "TTD", "BBD", "GYD":
 		account, err := db.GetPaymentAccountFull(ctx, userID, "wipay")
 		if err == nil && account.IsActive {
 			result = append(result, "wipay")
@@ -1774,7 +1774,7 @@ func (db *DB) ListPaymentProcessorsForCurrency(ctx context.Context, userID, curr
 // JMD/TTD/BBD → WiPay only; USD → Stripe or PayPal based on freelancer preference.
 func (db *DB) GetBestPaymentAccountFull(ctx context.Context, userID, currency string) (*models.PaymentAccountFull, error) {
 	switch currency {
-	case "JMD", "TTD", "BBD":
+	case "JMD", "TTD", "BBD", "GYD":
 		account, err := db.GetPaymentAccountFull(ctx, userID, "wipay")
 		if err != nil || account == nil || !account.IsActive {
 			return nil, fmt.Errorf("WiPay is required for %s payments — connect your WiPay account in Settings → Payments", currency)
@@ -1838,6 +1838,19 @@ func (db *DB) CreatePayment(ctx context.Context, p *models.Payment) error {
 	}
 	*p = results[0]
 	return nil
+}
+
+// UpdatePaymentProcessorID updates the processor_payment_id on a payment record.
+// Used when WiPay sends their transaction_id in the webhook callback.
+func (db *DB) UpdatePaymentProcessorID(ctx context.Context, paymentID, processorPaymentID string) error {
+	_, _, err := db.client.From("payments").
+		Update(map[string]interface{}{
+			"processor_payment_id": processorPaymentID,
+			"updated_at":           time.Now(),
+		}, "*", "").
+		Eq("id", paymentID).
+		Execute()
+	return err
 }
 
 func (db *DB) GetPaymentByProcessorID(ctx context.Context, processorPaymentID, processor string) (*models.Payment, error) {

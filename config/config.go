@@ -114,7 +114,7 @@ func Load() (*Config, error) {
 		PayPalWebhookID:             getEnv("PAYPAL_WEBHOOK_ID", ""),
 		PayPalEnvironment:           getEnv("PAYPAL_ENVIRONMENT", "sandbox"),
 		WiPayAPIURL:                 getEnv("WIPAY_API_URL", "https://wipayfinancial.com/api/v1"),
-		WiPayEnvironment:            getEnv("WIPAY_ENVIRONMENT", "live"),
+		WiPayEnvironment:            getEnv("WIPAY_ENVIRONMENT", "sandbox"),
 		PlatformFeePercent:          0.007,
 	}
 
