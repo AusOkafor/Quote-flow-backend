@@ -13,6 +13,7 @@ import (
 	"log"
 	"math"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -861,9 +862,34 @@ func (h *Handler) WiPayCheckout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Inject base tag so relative URLs resolve against WiPay's domain.
+	// Fixes JS/CSS assets loading when page is served from our domain.
+	origin := wipayOrigin(quote.Currency)
+	baseTag := `<base href="` + origin + `/">`
+	headRe := regexp.MustCompile(`(?i)<head[^>]*>`)
+	html = headRe.ReplaceAllStringFunc(html, func(match string) string {
+		return match + baseTag
+	})
+
+	w.Header().Set("Content-Security-Policy", "")
+	w.Header().Set("X-Frame-Options", "")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte(html))
+}
+
+// wipayOrigin returns the base origin URL for a given currency.
+func wipayOrigin(currency string) string {
+	switch currency {
+	case "TTD":
+		return "https://tt.wipayfinancial.com"
+	case "BBD":
+		return "https://bb.wipayfinancial.com"
+	case "GYD":
+		return "https://gy.wipayfinancial.com"
+	default:
+		return "https://jm.wipayfinancial.com"
+	}
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
