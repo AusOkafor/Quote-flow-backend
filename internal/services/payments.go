@@ -465,8 +465,9 @@ func (p *PaymentService) GetWiPayFormData(
 	}
 
 	responseURL := strings.TrimSuffix(p.cfg.AppURL, "/") + "/webhooks/wipay"
-	// return_url must use FrontendURL (client-facing), not AppURL (backend)
-	returnURL := fmt.Sprintf("%s/q/%s?payment=success&processor=wipay",
+	// return_url: no query params — & would be treated as form field separator by WiPay
+	// Quote page shows paid status from backend; ?payment=success not needed
+	returnURL := fmt.Sprintf("%s/q/%s",
 		strings.TrimSuffix(p.cfg.FrontendURL, "/"), quoteToken)
 
 	log.Printf("[WiPay] GetWiPayFormData: FrontendURL=%s AppURL=%s ReturnURL=%s",
