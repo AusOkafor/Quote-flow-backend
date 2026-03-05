@@ -93,7 +93,7 @@ func main() {
 	// Payment webhooks (no auth, verify by signature or form)
 	r.With(apiLimiter.Limit).Post("/webhooks/stripe-payment", h.StripePaymentWebhook)
 	r.With(apiLimiter.Limit).Post("/webhooks/paypal", h.PayPalWebhook)
-	r.With(apiLimiter.Limit).Post("/webhooks/wipay", h.WiPayWebhook)
+	r.With(apiLimiter.Limit).Get("/webhooks/wipay", h.WiPayWebhook)
 
 	// OAuth callbacks (public — Stripe/PayPal redirect here)
 	r.With(apiLimiter.Limit).Get("/payments/connect/stripe/callback", h.StripeConnectCallback)
