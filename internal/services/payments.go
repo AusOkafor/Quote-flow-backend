@@ -413,13 +413,17 @@ func (p *PaymentService) CreateWiPayLink(
 	quoteToken string,
 ) (string, error) {
 	if p.cfg.WiPayAPIURL == "" {
+		log.Printf("[WiPay] CreateWiPayLink failed: WiPay not configured (WIPAY_API_URL empty)")
 		return "", fmt.Errorf("WiPay not configured")
 	}
 	if account.WiPayAccountID == "" || account.WiPayAPIKey == "" {
+		log.Printf("[WiPay] CreateWiPayLink failed: WiPay account not connected (missing account_number or api_key)")
 		return "", fmt.Errorf("WiPay account not connected")
 	}
 
 	countryCode := wipayCountryCode(currency)
+	log.Printf("[WiPay] CreateWiPayLink: amount=%.2f currency=%s countryCode=%s order_id=%s env=%s",
+		amount, currency, countryCode, quoteToken, p.cfg.WiPayEnvironment)
 	hashInput := fmt.Sprintf("%s%s%.2f%s",
 		account.WiPayAccountID,
 		quoteToken,
@@ -461,22 +465,35 @@ func (p *PaymentService) CreateWiPayLink(
 	client := &http.Client{Timeout: 15 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
+		log.Printf("[WiPay] CreateWiPayLink HTTP request failed: %v", err)
 		return "", fmt.Errorf("wipay call failed: %w", err)
 	}
 	defer resp.Body.Close()
 
+	respBody, _ := io.ReadAll(resp.Body)
 	var result struct {
 		URL   string `json:"url"`
 		Error string `json:"error"`
 	}
-	_ = json.NewDecoder(resp.Body).Decode(&result)
+	_ = json.Unmarshal(respBody, &result)
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		log.Printf("[WiPay] CreateWiPayLink failed: HTTP %d | raw: %s", resp.StatusCode, string(respBody))
+		if result.Error != "" {
+			return "", fmt.Errorf("wipay error: %s", result.Error)
+		}
+		return "", fmt.Errorf("wipay API returned HTTP %d", resp.StatusCode)
+	}
 
 	if result.Error != "" {
+		log.Printf("[WiPay] CreateWiPayLink WiPay API error: %s | raw: %s", result.Error, string(respBody))
 		return "", fmt.Errorf("wipay error: %s", result.Error)
 	}
 	if result.URL == "" {
+		log.Printf("[WiPay] CreateWiPayLink no URL in response: %s", string(respBody))
 		return "", fmt.Errorf("wipay returned no payment URL")
 	}
+	log.Printf("[WiPay] CreateWiPayLink success: URL received")
 	return result.URL, nil
 }
 

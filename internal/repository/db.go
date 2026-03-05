@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"math"
 	"sort"
 	"strings"
@@ -1712,14 +1713,17 @@ func (db *DB) DisconnectPaymentAccount(ctx context.Context, userID, processor st
 // Credentials are stored encrypted — never plaintext.
 func (db *DB) SaveWiPayAccount(ctx context.Context, userID, accountNumber, apiKey string) error {
 	if db.cfg.EncryptionKey == "" {
+		log.Printf("[WiPay] SaveWiPayAccount failed: ENCRYPTION_KEY not set")
 		return fmt.Errorf("ENCRYPTION_KEY required for WiPay credentials")
 	}
 	encAccountNumber, err := services.Encrypt(accountNumber, db.cfg.EncryptionKey)
 	if err != nil {
+		log.Printf("[WiPay] SaveWiPayAccount encrypt account_number failed: %v", err)
 		return fmt.Errorf("encrypting wipay account number: %w", err)
 	}
 	encAPIKey, err := services.Encrypt(apiKey, db.cfg.EncryptionKey)
 	if err != nil {
+		log.Printf("[WiPay] SaveWiPayAccount encrypt api_key failed: %v", err)
 		return fmt.Errorf("encrypting wipay api key: %w", err)
 	}
 
@@ -1735,7 +1739,12 @@ func (db *DB) SaveWiPayAccount(ctx context.Context, userID, accountNumber, apiKe
 	_, _, err = db.client.From("payment_accounts").
 		Upsert(data, "user_id,processor", "representation", "").
 		Execute()
-	return err
+	if err != nil {
+		log.Printf("[WiPay] SaveWiPayAccount upsert failed: %v", err)
+		return err
+	}
+	log.Printf("[WiPay] SaveWiPayAccount success for user %s", userID)
+	return nil
 }
 
 // ListPaymentProcessorsForCurrency returns processors available for the given currency.

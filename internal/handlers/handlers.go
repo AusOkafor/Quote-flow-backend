@@ -479,15 +479,19 @@ func (h *Handler) ConnectWiPay(w http.ResponseWriter, r *http.Request) {
 
 	var req models.ConnectWiPayRequest
 	if err := h.decode(r, &req); err != nil {
+		log.Printf("[WiPay] ConnectWiPay decode failed: %v", err)
 		h.err(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 	if err := h.validateRequest(&req); err != nil {
+		log.Printf("[WiPay] ConnectWiPay validation failed: %v", err)
 		h.err(w, http.StatusBadRequest, validationErrorMsg(err))
 		return
 	}
 
+	log.Printf("[WiPay] ConnectWiPay saving account for user %s", user.ID)
 	if err := h.db.SaveWiPayAccount(r.Context(), user.ID, req.AccountNumber, req.APIKey); err != nil {
+		log.Printf("[WiPay] ConnectWiPay SaveWiPayAccount failed: %v", err)
 		h.err(w, http.StatusInternalServerError, "failed to save WiPay account")
 		return
 	}
@@ -596,6 +600,7 @@ func (h *Handler) CreatePaymentLink(w http.ResponseWriter, r *http.Request) {
 	case models.ProcessorWiPay:
 		paymentURL, err = h.payments.CreateWiPayLink(account, amount, quote.Currency, quote.ShareToken)
 		if err != nil {
+			log.Printf("[WiPay] CreatePaymentLink failed: %v", err)
 			h.err(w, http.StatusInternalServerError, "WiPay error: "+err.Error())
 			return
 		}
@@ -743,7 +748,12 @@ func (h *Handler) PublicCreatePaymentLink(w http.ResponseWriter, r *http.Request
 	case models.ProcessorWiPay:
 		paymentURL, err = h.payments.CreateWiPayLink(account, amount, quote.Currency, quote.ShareToken)
 		if err != nil {
-			h.err(w, http.StatusInternalServerError, "payment link failed")
+			log.Printf("[WiPay] PublicCreatePaymentLink failed: %v", err)
+			errMsg := "payment link failed"
+			if h.cfg.IsDevelopment() {
+				errMsg = err.Error()
+			}
+			h.err(w, http.StatusInternalServerError, errMsg)
 			return
 		}
 		processorPaymentID = quote.ShareToken
