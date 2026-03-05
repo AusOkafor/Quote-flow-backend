@@ -67,10 +67,6 @@ type Config struct {
 	PayPalWebhookID    string
 	PayPalEnvironment  string // "sandbox" or "live" — sandbox credentials only work with api.sandbox.paypal.com
 
-	// WiPay
-	WiPayAPIURL      string
-	WiPayEnvironment string
-
 	// Platform fee (0.7%)
 	PlatformFeePercent float64
 }
@@ -113,8 +109,6 @@ func Load() (*Config, error) {
 		PayPalBNCode:                getEnv("PAYPAL_BN_CODE", "QuoteFlow_SP"),
 		PayPalWebhookID:             getEnv("PAYPAL_WEBHOOK_ID", ""),
 		PayPalEnvironment:           getEnv("PAYPAL_ENVIRONMENT", "sandbox"),
-		WiPayAPIURL:                 getEnv("WIPAY_API_URL", "https://wipayfinancial.com/api/v1"),
-		WiPayEnvironment:           getEnv("WIPAY_ENVIRONMENT", "sandbox"),
 		PlatformFeePercent:          0.007,
 	}
 

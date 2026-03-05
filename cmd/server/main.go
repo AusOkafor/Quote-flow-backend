@@ -140,7 +140,7 @@ func main() {
 		r.Post("/billing/create-checkout-session", h.CreateCheckoutSession)
 		r.Post("/billing/portal", h.CreateBillingPortalSession)
 
-		// Payments (Stripe Connect, PayPal, WiPay)
+		// Payments (Stripe Connect, PayPal)
 		r.Route("/payments", func(r chi.Router) {
 			r.Get("/accounts", h.ListPaymentAccounts)
 			r.Post("/connect/stripe", h.ConnectStripe)

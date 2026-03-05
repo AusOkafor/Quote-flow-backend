@@ -1598,7 +1598,7 @@ func (db *DB) RemoveTeamMember(ctx context.Context, teamID, userID string) error
 
 func (db *DB) ListPaymentAccounts(ctx context.Context, userID string) ([]models.PaymentAccount, error) {
 	raw, _, err := db.client.From("payment_accounts").
-		Select("id,user_id,processor,wipay_account_id,stripe_account_id,paypal_merchant_id,is_active,created_at", "exact", false).
+		Select("id,user_id,processor,stripe_account_id,paypal_merchant_id,is_active,created_at", "exact", false).
 		Eq("user_id", userID).
 		Eq("is_active", "true").
 		Execute()
@@ -1611,7 +1611,7 @@ func (db *DB) ListPaymentAccounts(ctx context.Context, userID string) ([]models.
 
 func (db *DB) GetPaymentAccount(ctx context.Context, userID, processor string) (*models.PaymentAccount, error) {
 	raw, _, err := db.client.From("payment_accounts").
-		Select("id,user_id,processor,wipay_account_id,stripe_account_id,paypal_merchant_id,is_active,created_at", "exact", false).
+		Select("id,user_id,processor,stripe_account_id,paypal_merchant_id,is_active,created_at", "exact", false).
 		Eq("user_id", userID).
 		Eq("processor", processor).
 		Eq("is_active", "true").
