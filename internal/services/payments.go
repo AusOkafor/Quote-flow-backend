@@ -465,10 +465,12 @@ func (p *PaymentService) GetWiPayFormData(
 	}
 
 	responseURL := strings.TrimSuffix(p.cfg.AppURL, "/") + "/webhooks/wipay"
-	// Same pattern as Stripe/PayPal: redirect to quote page with success param
-	// Keep original token for return_url so frontend lands on correct /q/{token}
+	// return_url must use FrontendURL (client-facing), not AppURL (backend)
 	returnURL := fmt.Sprintf("%s/q/%s?payment=success&processor=wipay",
-		strings.TrimSuffix(p.cfg.FrontendURL, "/"), url.PathEscape(quoteToken))
+		strings.TrimSuffix(p.cfg.FrontendURL, "/"), quoteToken)
+
+	log.Printf("[WiPay] GetWiPayFormData: FrontendURL=%s AppURL=%s ReturnURL=%s",
+		p.cfg.FrontendURL, p.cfg.AppURL, returnURL)
 
 	// WiPay rejects order_id with underscores or dashes — sanitize for form
 	wipayOrderID := strings.NewReplacer("_", "", "-", "").Replace(quoteToken)
