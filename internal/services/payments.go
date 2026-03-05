@@ -429,23 +429,24 @@ func wipayCountryCode(currency string) string {
 	}
 }
 
-// CreateWiPayLink generates a WiPay payment URL for the given quote.
+// CreateWiPayCheckout POSTs to WiPay and returns the raw HTML response.
+// WiPay returns the full payment page HTML directly — we proxy it to the client.
 //
-// How it works:
+// Flow:
 //  1. We POST form fields to the country-specific WiPay endpoint
-//  2. WiPay responds with a JSON object containing a payment URL
-//  3. We redirect the client to that URL to complete payment
-//  4. After payment, WiPay redirects to return_url and POSTs to response_url
+//  2. WiPay responds with the payment page HTML (not JSON)
+//  3. We return that HTML; frontend displays it in-page or redirects
+//  4. After payment, WiPay redirects to return_url and POSTs to response_url (webhook)
 //
-// Platform fee: NONE — 0% for WiPay. Full amount goes to the freelancer.
-func (p *PaymentService) CreateWiPayLink(
+// Platform fee: NONE — 0% for WiPay.
+func (p *PaymentService) CreateWiPayCheckout(
 	account *models.PaymentAccountFull,
 	amount float64,
 	currency string,
 	quoteToken string,
 ) (string, error) {
 	if account.WiPayAccountID == "" || account.WiPayAPIKey == "" {
-		log.Printf("[WiPay] CreateWiPayLink failed: WiPay account not connected (missing account_number or api_key)")
+		log.Printf("[WiPay] CreateWiPayCheckout failed: WiPay account not connected (missing account_number or api_key)")
 		return "", fmt.Errorf("WiPay account not connected")
 	}
 
@@ -456,13 +457,12 @@ func (p *PaymentService) CreateWiPayLink(
 	if env == "" {
 		env = "sandbox"
 	}
-	log.Printf("[WiPay] CreateWiPayLink: amount=%.2f currency=%s countryCode=%s order_id=%s env=%s endpoint=%s",
+	log.Printf("[WiPay] CreateWiPayCheckout: amount=%.2f currency=%s countryCode=%s order_id=%s env=%s endpoint=%s",
 		amount, currency, countryCode, quoteToken, env, endpoint)
 
 	responseURL := strings.TrimSuffix(p.cfg.AppURL, "/") + "/webhooks/wipay"
 	returnURL := strings.TrimSuffix(p.cfg.FrontendURL, "/") + "/payment/complete?quote=" + url.QueryEscape(quoteToken)
 
-	// WiPay expects application/x-www-form-urlencoded (form POST, not JSON)
 	formData := url.Values{}
 	formData.Set("account_number", account.WiPayAccountID)
 	formData.Set("avs", "0")
@@ -497,7 +497,7 @@ func (p *PaymentService) CreateWiPayLink(
 	client := &http.Client{Timeout: 15 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		log.Printf("[WiPay] CreateWiPayLink HTTP request failed: %v", err)
+		log.Printf("[WiPay] CreateWiPayCheckout HTTP request failed: %v", err)
 		return "", fmt.Errorf("wipay request failed: %w", err)
 	}
 	defer resp.Body.Close()
@@ -507,39 +507,15 @@ func (p *PaymentService) CreateWiPayLink(
 		return "", fmt.Errorf("wipay read response: %w", err)
 	}
 
-	log.Printf("[WiPay] raw response status=%d body=%s",
-		resp.StatusCode,
-		string(respBody),
-	)
+	log.Printf("[WiPay] raw response status=%d body_len=%d",
+		resp.StatusCode, len(respBody))
 
 	if resp.StatusCode != http.StatusOK {
-		log.Printf("[WiPay] CreateWiPayLink failed: HTTP %d | raw: %s", resp.StatusCode, string(respBody))
+		log.Printf("[WiPay] CreateWiPayCheckout failed: HTTP %d | body: %s", resp.StatusCode, string(respBody))
 		return "", fmt.Errorf("wipay returned HTTP %d: %s", resp.StatusCode, string(respBody))
 	}
 
-	// Detect HTML error response (WiPay returns HTML instead of JSON on errors)
-	bodyStr := string(respBody)
-	if strings.Contains(bodyStr, "<html") || strings.Contains(bodyStr, "<!DOCTYPE") {
-		return "", fmt.Errorf("wipay returned an HTML error page — check environment setting")
-	}
-
-	var result struct {
-		URL     string `json:"url"`
-		Message string `json:"message"`
-	}
-	if err := json.Unmarshal(respBody, &result); err != nil {
-		preview := bodyStr
-		if len(preview) > 200 {
-			preview = preview[:200]
-		}
-		log.Printf("[WiPay] CreateWiPayLink response decode failed: %v | raw: %s", err, bodyStr)
-		return "", fmt.Errorf("wipay response decode: %w — body: %s", err, preview)
-	}
-
-	if result.URL == "" {
-		log.Printf("[WiPay] CreateWiPayLink no URL in response: %s", string(respBody))
-		return "", fmt.Errorf("wipay returned no payment URL — message: %s", result.Message)
-	}
-	log.Printf("[WiPay] CreateWiPayLink success: URL received")
-	return result.URL, nil
+	// WiPay returns the full payment page HTML — return it as-is
+	log.Printf("[WiPay] CreateWiPayCheckout success: returning HTML (%d bytes)", len(respBody))
+	return string(respBody), nil
 }

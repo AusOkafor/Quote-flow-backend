@@ -599,34 +599,33 @@ func (h *Handler) CreatePaymentLink(w http.ResponseWriter, r *http.Request) {
 		}
 		paymentURL, processorPaymentID = link.ApproveURL, link.OrderID
 	case models.ProcessorWiPay:
-		paymentURL, err = h.payments.CreateWiPayLink(account, amount, quote.Currency, quote.ShareToken)
-		if err != nil {
-			log.Printf("[WiPay] CreatePaymentLink failed: %v", err)
-			h.err(w, http.StatusInternalServerError, "WiPay error: "+err.Error())
-			return
-		}
+		// WiPay uses proxy checkout — return our checkout URL
+		paymentURL = strings.TrimSuffix(h.cfg.AppURL, "/") + "/q/" + quote.ShareToken + "/wipay-checkout?type=" + string(req.PaymentType)
 		processorPaymentID = quote.ShareToken
 	default:
 		h.err(w, http.StatusBadRequest, "unsupported processor")
 		return
 	}
 
-	payment := &models.Payment{
-		QuoteID:            quote.ID,
-		UserID:             user.ID,
-		Processor:          account.Processor,
-		PaymentType:        req.PaymentType,
-		Amount:             amount,
-		PlatformFee:        platformFee,
-		NetAmount:          netAmount,
-		Currency:           quote.Currency,
-		Status:             models.PaymentStatusPending,
-		ProcessorPaymentID: processorPaymentID,
-		PaymentURL:         paymentURL,
-	}
-	if err := h.db.CreatePayment(r.Context(), payment); err != nil {
-		h.err(w, http.StatusInternalServerError, "failed to create payment record")
-		return
+	// WiPay: payment created when client visits checkout URL — don't create here
+	if account.Processor != models.ProcessorWiPay {
+		payment := &models.Payment{
+			QuoteID:            quote.ID,
+			UserID:             user.ID,
+			Processor:          account.Processor,
+			PaymentType:        req.PaymentType,
+			Amount:             amount,
+			PlatformFee:        platformFee,
+			NetAmount:          netAmount,
+			Currency:           quote.Currency,
+			Status:             models.PaymentStatusPending,
+			ProcessorPaymentID: processorPaymentID,
+			PaymentURL:         paymentURL,
+		}
+		if err := h.db.CreatePayment(r.Context(), payment); err != nil {
+			h.err(w, http.StatusInternalServerError, "failed to create payment record")
+			return
+		}
 	}
 
 	h.ok(w, models.PaymentLinkResponse{
@@ -747,38 +746,33 @@ func (h *Handler) PublicCreatePaymentLink(w http.ResponseWriter, r *http.Request
 		}
 		paymentURL, processorPaymentID = link.ApproveURL, link.OrderID
 	case models.ProcessorWiPay:
-		paymentURL, err = h.payments.CreateWiPayLink(account, amount, quote.Currency, quote.ShareToken)
-		if err != nil {
-			log.Printf("[WiPay] PublicCreatePaymentLink failed: %v", err)
-			errMsg := "payment link failed"
-			if h.cfg.IsDevelopment() {
-				errMsg = err.Error()
-			}
-			h.err(w, http.StatusInternalServerError, errMsg)
-			return
-		}
+		// WiPay uses proxy checkout — return our checkout URL (payment created when they visit)
+		paymentURL = strings.TrimSuffix(h.cfg.AppURL, "/") + "/q/" + quote.ShareToken + "/wipay-checkout?type=" + string(req.PaymentType)
 		processorPaymentID = quote.ShareToken
 	default:
 		h.err(w, http.StatusBadRequest, "unsupported processor")
 		return
 	}
 
-	payment := &models.Payment{
-		QuoteID:            quote.ID,
-		UserID:             userID,
-		Processor:          account.Processor,
-		PaymentType:        req.PaymentType,
-		Amount:             amount,
-		PlatformFee:        platformFee,
-		NetAmount:          netAmount,
-		Currency:           quote.Currency,
-		Status:             models.PaymentStatusPending,
-		ProcessorPaymentID: processorPaymentID,
-		PaymentURL:         paymentURL,
-	}
-	if err := h.db.CreatePayment(r.Context(), payment); err != nil {
-		h.err(w, http.StatusInternalServerError, "failed to create payment record")
-		return
+	// WiPay: payment is created when client visits checkout URL — don't create here
+	if account.Processor != models.ProcessorWiPay {
+		payment := &models.Payment{
+			QuoteID:            quote.ID,
+			UserID:             userID,
+			Processor:          account.Processor,
+			PaymentType:        req.PaymentType,
+			Amount:             amount,
+			PlatformFee:        platformFee,
+			NetAmount:          netAmount,
+			Currency:           quote.Currency,
+			Status:             models.PaymentStatusPending,
+			ProcessorPaymentID: processorPaymentID,
+			PaymentURL:         paymentURL,
+		}
+		if err := h.db.CreatePayment(r.Context(), payment); err != nil {
+			h.err(w, http.StatusInternalServerError, "failed to create payment record")
+			return
+		}
 	}
 
 	h.ok(w, models.PaymentLinkResponse{
@@ -790,6 +784,86 @@ func (h *Handler) PublicCreatePaymentLink(w http.ResponseWriter, r *http.Request
 		PaymentType: req.PaymentType,
 		Processor:   account.Processor,
 	})
+}
+
+// GET /q/:token/wipay-checkout?type=full|deposit|balance — public
+// Proxies WiPay payment page: fetches HTML from WiPay and returns it.
+// Client navigates here directly; no POST /pay needed for WiPay.
+func (h *Handler) WiPayCheckout(w http.ResponseWriter, r *http.Request) {
+	token := chi.URLParam(r, "token")
+	quote, err := h.db.GetQuoteByShareToken(r.Context(), token)
+	if err != nil || quote == nil {
+		h.err(w, http.StatusNotFound, "quote not found")
+		return
+	}
+	if quote.Status != models.StatusAccepted {
+		h.err(w, http.StatusBadRequest, "quote must be accepted before payment")
+		return
+	}
+	if quote.Currency != "JMD" && quote.Currency != "TTD" && quote.Currency != "BBD" && quote.Currency != "GYD" {
+		h.err(w, http.StatusBadRequest, "WiPay only supports JMD, TTD, BBD, and GYD")
+		return
+	}
+
+	paymentTypeStr := r.URL.Query().Get("type")
+	if paymentTypeStr == "" {
+		paymentTypeStr = "full"
+	}
+	paymentType := models.PaymentType(paymentTypeStr)
+	if paymentType != models.PaymentTypeFull && paymentType != models.PaymentTypeDeposit && paymentType != models.PaymentTypeBalance {
+		h.err(w, http.StatusBadRequest, "type must be full, deposit, or balance")
+		return
+	}
+
+	var amount float64
+	switch paymentType {
+	case models.PaymentTypeFull:
+		amount = quote.Total
+	case models.PaymentTypeDeposit:
+		amount = calcDeposit(quote)
+	case models.PaymentTypeBalance:
+		depositPaid, _ := h.db.GetDepositPaid(r.Context(), quote.ID)
+		amount = math.Round((quote.Total-depositPaid)*100) / 100
+		if amount <= 0 {
+			h.err(w, http.StatusBadRequest, "balance already paid")
+			return
+		}
+	}
+
+	account, err := h.db.GetPaymentAccountFull(r.Context(), quote.UserID, "wipay")
+	if err != nil || account == nil {
+		h.err(w, http.StatusBadRequest, "WiPay not connected")
+		return
+	}
+
+	payment := &models.Payment{
+		QuoteID:            quote.ID,
+		UserID:             quote.UserID,
+		Processor:          models.ProcessorWiPay,
+		PaymentType:        paymentType,
+		Amount:             amount,
+		PlatformFee:        0,
+		NetAmount:          amount,
+		Currency:           quote.Currency,
+		Status:             models.PaymentStatusPending,
+		ProcessorPaymentID: token,
+	}
+	if err := h.db.CreatePayment(r.Context(), payment); err != nil {
+		log.Printf("[WiPay] WiPayCheckout CreatePayment failed: %v", err)
+		h.err(w, http.StatusInternalServerError, "failed to create payment record")
+		return
+	}
+
+	html, err := h.payments.CreateWiPayCheckout(account, amount, quote.Currency, token)
+	if err != nil {
+		log.Printf("[WiPay] WiPayCheckout CreateWiPayCheckout failed: %v", err)
+		h.err(w, http.StatusInternalServerError, "failed to create WiPay checkout")
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(html))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

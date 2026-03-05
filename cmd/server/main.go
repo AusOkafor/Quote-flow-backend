@@ -105,6 +105,7 @@ func main() {
 		r.Get("/", h.PublicGetQuote) // load quote data for viewer
 		r.With(acceptLimiter.Limit).Post("/accept", h.PublicAcceptQuote)
 		r.With(paymentLimiter.Limit).Post("/pay", h.PublicCreatePaymentLink)
+		r.With(paymentLimiter.Limit).Get("/wipay-checkout", h.WiPayCheckout)
 		r.Get("/notes", h.PublicGetNotes)
 		r.With(acceptLimiter.Limit).Post("/notes", h.PublicPostNote)
 	})
