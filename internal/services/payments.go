@@ -477,6 +477,16 @@ func (p *PaymentService) CreateWiPayLink(
 	formData.Set("return_url", returnURL)
 	formData.Set("total", fmt.Sprintf("%.2f", amount))
 
+	log.Printf("[WiPay] form fields: account_number=%s environment=%s fee_structure=%s method=%s country_code=%s total=%s order_id=%s",
+		account.WiPayAccountID,
+		formData.Get("environment"),
+		formData.Get("fee_structure"),
+		formData.Get("method"),
+		formData.Get("country_code"),
+		formData.Get("total"),
+		formData.Get("order_id"),
+	)
+
 	req, err := http.NewRequest("POST", endpoint, strings.NewReader(formData.Encode()))
 	if err != nil {
 		return "", fmt.Errorf("wipay build request: %w", err)
@@ -497,6 +507,11 @@ func (p *PaymentService) CreateWiPayLink(
 		return "", fmt.Errorf("wipay read response: %w", err)
 	}
 
+	log.Printf("[WiPay] raw response status=%d body=%s",
+		resp.StatusCode,
+		string(respBody),
+	)
+
 	if resp.StatusCode != http.StatusOK {
 		log.Printf("[WiPay] CreateWiPayLink failed: HTTP %d | raw: %s", resp.StatusCode, string(respBody))
 		return "", fmt.Errorf("wipay returned HTTP %d: %s", resp.StatusCode, string(respBody))
@@ -505,7 +520,6 @@ func (p *PaymentService) CreateWiPayLink(
 	// Detect HTML error response (WiPay returns HTML instead of JSON on errors)
 	bodyStr := string(respBody)
 	if strings.Contains(bodyStr, "<html") || strings.Contains(bodyStr, "<!DOCTYPE") {
-		log.Printf("[WiPay] CreateWiPayLink received HTML instead of JSON — check environment setting")
 		return "", fmt.Errorf("wipay returned an HTML error page — check environment setting")
 	}
 
