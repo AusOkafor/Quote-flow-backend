@@ -40,11 +40,12 @@ type Handler struct {
 	notif    *services.NotificationService
 	auth     *services.AuthService
 	payments *services.PaymentService
+	email    *services.EmailService
 	cfg      *config.Config
 }
 
-func New(db *repository.DB, notif *services.NotificationService, auth *services.AuthService, payments *services.PaymentService, cfg *config.Config) *Handler {
-	return &Handler{db: db, notif: notif, auth: auth, payments: payments, cfg: cfg}
+func New(db *repository.DB, notif *services.NotificationService, auth *services.AuthService, payments *services.PaymentService, email *services.EmailService, cfg *config.Config) *Handler {
+	return &Handler{db: db, notif: notif, auth: auth, payments: payments, email: email, cfg: cfg}
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -96,11 +97,64 @@ func validationErrorMsg(err error) string {
 				msgs = append(msgs, fmt.Sprintf("%s must be at most %s", fe.Field(), fe.Param()))
 			default:
 				msgs = append(msgs, fmt.Sprintf("%s failed %s validation", fe.Field(), fe.Tag()))
-			}
+		}
 		}
 		return strings.Join(msgs, "; ")
 	}
 	return err.Error()
+}
+
+func formatProcessor(p models.PaymentProcessor) string {
+	switch p {
+	case models.ProcessorWiPay:
+		return "WiPay"
+	case models.ProcessorStripe:
+		return "Stripe"
+	case models.ProcessorPayPal:
+		return "PayPal"
+	default:
+		return string(p)
+	}
+}
+
+func formatPaymentType(t models.PaymentType) string {
+	switch t {
+	case models.PaymentTypeDeposit:
+		return "Deposit"
+	case models.PaymentTypeBalance:
+		return "Balance Payment"
+	case models.PaymentTypeFull:
+		return "Full Payment"
+	default:
+		return string(t)
+	}
+}
+
+func formatAmount(amount float64, currency string) string {
+	symbols := map[string]string{
+		"JMD": "J$",
+		"USD": "$",
+		"TTD": "TT$",
+		"BBD": "Bds$",
+		"GYD": "G$",
+		"GBP": "£",
+		"EUR": "€",
+	}
+	symbol := symbols[currency]
+	if symbol == "" {
+		symbol = currency + " "
+	}
+	// Format with thousands separators
+	parts := strings.Split(fmt.Sprintf("%.2f", amount), ".")
+	intPart := parts[0]
+	var b strings.Builder
+	for i := 0; i < len(intPart); i++ {
+		if i > 0 && (len(intPart)-i)%3 == 0 {
+			b.WriteString(",")
+		}
+		b.WriteByte(intPart[i])
+	}
+	return symbol + b.String() + "." + parts[1]
 }
 
 func currentUser(r *http.Request) *models.User {
@@ -1443,6 +1497,37 @@ func (h *Handler) handlePaymentConfirmed(ctx context.Context, quoteID string, pa
 		profile, _ := h.db.GetProfile(bgCtx, payment.UserID)
 		if quote != nil && profile != nil {
 			_ = h.notif.SendPaymentReceivedNotification(quote, payment, profile.EmailOnQuote)
+		}
+		// Send receipt email to client
+		if quote != nil && quote.Client.Email != "" {
+			freelancerName := "Your service provider"
+			businessName := ""
+			if profile != nil {
+				businessName = profile.BusinessName
+				if profile.BusinessName != "" {
+					freelancerName = profile.BusinessName
+				} else if profile.Profession != "" {
+					freelancerName = profile.Profession
+				}
+			}
+			receiptData := services.PaymentReceiptData{
+				ClientName:     quote.Client.Name,
+				ClientEmail:    quote.Client.Email,
+				FreelancerName: freelancerName,
+				BusinessName:   businessName,
+				ReceiptNumber:  fmt.Sprintf("QF-RCP-%s", payment.ID),
+				TransactionID:  payment.ProcessorPaymentID,
+				Processor:      formatProcessor(payment.Processor),
+				PaymentDate:    time.Now().Format("January 2, 2006"),
+				PaymentType:    formatPaymentType(payment.PaymentType),
+				QuoteNumber:    quote.QuoteNumber,
+				QuoteURL:       fmt.Sprintf("%s/q/%s", strings.TrimSuffix(h.cfg.FrontendURL, "/"), quote.ShareToken),
+				Amount:         formatAmount(payment.Amount, payment.Currency),
+				Currency:       payment.Currency,
+			}
+			if err := h.email.SendPaymentReceiptEmail(receiptData); err != nil {
+				log.Printf("[Receipt] failed to send receipt email: %v", err)
+			}
 		}
 	}()
 }

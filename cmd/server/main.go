@@ -39,7 +39,8 @@ func main() {
 	notif    := services.NewNotificationService(cfg)
 	auth     := services.NewAuthService(cfg)
 	payments := services.NewPaymentService(cfg)
-	h        := handlers.New(db, notif, auth, payments, cfg)
+	email    := services.NewEmailService(cfg)
+	h        := handlers.New(db, notif, auth, payments, email, cfg)
 
 	jwtVerifier, err := middleware.NewJWTVerifier(cfg)
 	if err != nil {
