@@ -1280,6 +1280,9 @@ func verifyWiPayHash(transactionID, apiKey, receivedHash string) bool {
 // GET /app — WiPay redirects here after payment (ignores return_url).
 // Read cookie set in WiPayCheckout to know which quote to redirect to.
 func (h *Handler) WiPayAppRedirect(w http.ResponseWriter, r *http.Request) {
+	log.Printf("[WiPay] /app hit: url=%s query=%s",
+		r.URL.String(), r.URL.RawQuery)
+
 	cookie, err := r.Cookie("wipay_quote_token")
 	if err == nil && cookie.Value != "" {
 		// Clear the cookie
@@ -1293,12 +1296,14 @@ func (h *Handler) WiPayAppRedirect(w http.ResponseWriter, r *http.Request) {
 		})
 		redirectURL := fmt.Sprintf("%s/q/%s?payment=success&processor=wipay",
 			strings.TrimSuffix(h.cfg.FrontendURL, "/"), cookie.Value)
-		log.Printf("[WiPay] /app redirect: cookie -> %s", redirectURL)
+		log.Printf("[WiPay] /app redirecting to: %s", redirectURL)
 		http.Redirect(w, r, redirectURL, http.StatusFound)
 		return
 	}
 	// Fallback — redirect to frontend home
-	http.Redirect(w, r, strings.TrimSuffix(h.cfg.FrontendURL, "/"), http.StatusFound)
+	redirectURL := strings.TrimSuffix(h.cfg.FrontendURL, "/")
+	log.Printf("[WiPay] /app no cookie, redirecting to: %s", redirectURL)
+	http.Redirect(w, r, redirectURL, http.StatusFound)
 }
 
 // GET /webhooks/wipay — WiPay sends webhook as GET with query string parameters.
