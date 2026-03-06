@@ -864,10 +864,13 @@ func (h *Handler) WiPayCheckout(w http.ResponseWriter, r *http.Request) {
 
 	// Return an auto-submitting HTML form that POSTs directly to WiPay.
 	// This bypasses all CORS issues — the browser submits directly to WiPay's domain.
+	// Meta refresh: if WiPay doesn't redirect back, return to quote page after 3 minutes.
+	fallbackURL := strings.TrimSuffix(h.cfg.FrontendURL, "/") + "/q/" + token
 	html := fmt.Sprintf(`<!DOCTYPE html>
 <html>
 <head>
     <title>Redirecting to WiPay...</title>
+    <meta http-equiv="refresh" content="180;url=%s">
     <style>
         body { 
             font-family: -apple-system, sans-serif; 
@@ -895,6 +898,9 @@ func (h *Handler) WiPayCheckout(w http.ResponseWriter, r *http.Request) {
             <path d="M12 6v6l4 2"/>
         </svg>
         <p>Redirecting to WiPay secure checkout...</p>
+        <p style="font-size:12px;color:#999;margin-top:8px;">
+            You will be automatically returned to your quote after payment.
+        </p>
     </div>
     <form id="wipay-form" method="POST" action="%s">
         <input type="hidden" name="account_number" value="%s">
@@ -915,6 +921,7 @@ func (h *Handler) WiPayCheckout(w http.ResponseWriter, r *http.Request) {
     </script>
 </body>
 </html>`,
+		fallbackURL,
 		formData.Endpoint,
 		html.EscapeString(formData.AccountNumber),
 		html.EscapeString(formData.AVS),
