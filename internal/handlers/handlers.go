@@ -1533,96 +1533,32 @@ func (h *Handler) handlePaymentConfirmed(ctx context.Context, quoteID string, pa
 }
 
 // POST /billing/webhook — Stripe webhook (no auth, verify signature)
+// TEMPORARY: diagnostic version to troubleshoot 400
 func (h *Handler) StripeWebhook(w http.ResponseWriter, r *http.Request) {
-	if h.cfg.StripeWebhookSecret == "" {
-		h.err(w, http.StatusServiceUnavailable, "webhook not configured")
-		return
-	}
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		h.err(w, http.StatusBadRequest, "failed to read body")
-		return
-	}
+	body, _ := io.ReadAll(r.Body)
 	sig := r.Header.Get("Stripe-Signature")
-	event, err := webhook.ConstructEvent(body, sig, h.cfg.StripeWebhookSecret)
+
+	sigPreview := sig
+	if len(sig) > 20 {
+		sigPreview = sig[:20]
+	}
+	secretPreview := "***"
+	if len(h.cfg.StripeWebhookSecret) >= 10 {
+		secretPreview = h.cfg.StripeWebhookSecret[:10]
+	}
+
+	log.Printf("[Billing] webhook: body_len=%d sig=%s secret=%s",
+		len(body), sigPreview, secretPreview)
+
+	_, err := webhook.ConstructEvent(body, sig, h.cfg.StripeWebhookSecret)
 	if err != nil {
-		h.err(w, http.StatusBadRequest, "invalid signature")
+		log.Printf("[Billing] webhook FAILED: %v", err)
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(err.Error()))
 		return
 	}
-	switch event.Type {
-	case "checkout.session.completed":
-		var sess stripe.CheckoutSession
-		if err := json.Unmarshal(event.Data.Raw, &sess); err != nil {
-			h.err(w, http.StatusBadRequest, "invalid payload")
-			return
-		}
-		userID := sess.ClientReferenceID
-		if userID == "" {
-			userID = sess.Metadata["user_id"]
-		}
-		if userID == "" {
-			profile, _ := h.db.GetProfileByStripeCustomerID(r.Context(), sess.Customer.ID)
-			if profile != nil {
-				userID = profile.UserID
-			}
-		}
-		if userID == "" {
-			h.err(w, http.StatusBadRequest, "cannot determine user")
-			return
-		}
-		plan := "pro"
-		if p, ok := sess.Metadata["plan"]; ok && p != "" {
-			plan = p
-		}
-		custID := ""
-		if sess.Customer != nil {
-			custID = sess.Customer.ID
-		} else {
-			var raw struct {
-				Customer string `json:"customer"`
-			}
-			_ = json.Unmarshal(event.Data.Raw, &raw)
-			custID = raw.Customer
-		}
-		_ = h.db.UpdateProfilePlan(r.Context(), userID, plan, custID)
-	case "customer.subscription.deleted":
-		var sub stripe.Subscription
-		if err := json.Unmarshal(event.Data.Raw, &sub); err != nil {
-			h.err(w, http.StatusBadRequest, "invalid payload")
-			return
-		}
-		custID := getSubscriptionCustomerID(&sub, event.Data.Raw)
-		profile, err := h.db.GetProfileByStripeCustomerID(r.Context(), custID)
-		if err != nil || profile == nil {
-			w.WriteHeader(http.StatusOK)
-			return
-		}
-		_ = h.db.UpdateProfilePlan(r.Context(), profile.UserID, "free", profile.StripeCustomerID)
-	case "customer.subscription.updated":
-		var sub stripe.Subscription
-		if err := json.Unmarshal(event.Data.Raw, &sub); err != nil {
-			h.err(w, http.StatusBadRequest, "invalid payload")
-			return
-		}
-		custID := getSubscriptionCustomerID(&sub, event.Data.Raw)
-		profile, err := h.db.GetProfileByStripeCustomerID(r.Context(), custID)
-		if err != nil || profile == nil {
-			w.WriteHeader(http.StatusOK)
-			return
-		}
-		plan := "free"
-		if sub.Status == stripe.SubscriptionStatusActive && len(sub.Items.Data) > 0 {
-			priceID := sub.Items.Data[0].Price.ID
-			if priceID == h.cfg.StripePriceBusinessMonthly || priceID == h.cfg.StripePriceBusinessAnnual {
-				plan = "business"
-			} else {
-				plan = "pro"
-			}
-		}
-		_ = h.db.UpdateProfilePlan(r.Context(), profile.UserID, plan, profile.StripeCustomerID)
-	default:
-		// Ignore other events
-	}
+
+	log.Printf("[Billing] webhook SUCCESS")
 	w.WriteHeader(http.StatusOK)
 }
 
