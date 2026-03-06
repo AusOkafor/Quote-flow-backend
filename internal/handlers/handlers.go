@@ -864,13 +864,13 @@ func (h *Handler) WiPayCheckout(w http.ResponseWriter, r *http.Request) {
 
 	// Return an auto-submitting HTML form that POSTs directly to WiPay.
 	// This bypasses all CORS issues — the browser submits directly to WiPay's domain.
-	// Meta refresh: if WiPay doesn't redirect back, return to quote page after 3 minutes.
+	// Form opens WiPay in new tab so this page stays open; meta refresh returns to quote after 30s.
 	fallbackURL := strings.TrimSuffix(h.cfg.FrontendURL, "/") + "/q/" + token
 	html := fmt.Sprintf(`<!DOCTYPE html>
 <html>
 <head>
-    <title>Redirecting to WiPay...</title>
-    <meta http-equiv="refresh" content="180;url=%s">
+    <title>Opening WiPay...</title>
+    <meta http-equiv="refresh" content="30;url=%s">
     <style>
         body { 
             font-family: -apple-system, sans-serif; 
@@ -897,12 +897,17 @@ func (h *Handler) WiPayCheckout(w http.ResponseWriter, r *http.Request) {
             <circle cx="12" cy="12" r="10"/>
             <path d="M12 6v6l4 2"/>
         </svg>
-        <p>Redirecting to WiPay secure checkout...</p>
-        <p style="font-size:12px;color:#999;margin-top:8px;">
-            You will be automatically returned to your quote after payment.
+        <p>Opening WiPay secure checkout...</p>
+        <p style="font-size:13px;color:#666;margin-top:8px;">
+            Complete your payment in the new tab.<br>
+            This page will automatically update when payment is confirmed.
+        </p>
+        <p style="font-size:11px;color:#999;margin-top:16px;">
+            If the new tab didn't open,
+            <a href="#" onclick="document.getElementById('wipay-form').submit(); return false;">click here</a>
         </p>
     </div>
-    <form id="wipay-form" method="POST" action="%s">
+    <form id="wipay-form" method="POST" action="%s" target="_blank">
         <input type="hidden" name="account_number" value="%s">
         <input type="hidden" name="avs" value="%s">
         <input type="hidden" name="country_code" value="%s">
