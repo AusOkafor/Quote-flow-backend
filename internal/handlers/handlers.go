@@ -1515,7 +1515,7 @@ func (h *Handler) handlePaymentConfirmed(ctx context.Context, quoteID string, pa
 				ClientEmail:    quote.Client.Email,
 				FreelancerName: freelancerName,
 				BusinessName:   businessName,
-				ReceiptNumber:  fmt.Sprintf("QF-RCP-%s", payment.ID),
+				ReceiptNumber:  fmt.Sprintf("QF-RCP-%s", quote.QuoteNumber),
 				TransactionID:  payment.ProcessorPaymentID,
 				Processor:      formatProcessor(payment.Processor),
 				PaymentDate:    time.Now().Format("January 2, 2006"),
