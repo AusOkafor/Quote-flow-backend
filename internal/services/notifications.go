@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"quoteflow-backend/config"
+	"quoteflow-backend/internal/copy"
 	"quoteflow-backend/internal/models"
 )
 
@@ -90,7 +91,7 @@ func (n *NotificationService) SendQuoteByEmail(quote *models.QuoteWithDetails, r
 		to = quote.Client.Email
 	}
 
-	subject := fmt.Sprintf("Quote %s from %s — %s", quote.QuoteNumber, senderName, quote.Title)
+	subject := copy.QuoteSubject(quote.QuoteNumber)
 	return n.sendEmail(to, subject, html)
 }
 
@@ -341,15 +342,24 @@ type QuoteEmailData struct {
 }
 
 func quoteEmailHTML(d QuoteEmailData, whiteLabel bool) string {
-	footer := `<tr>
+	headerRow := ""
+	footer := ""
+	if !whiteLabel {
+		headerRow = `<tr>
+    <td style="background:#0D0D0D;padding:28px 36px;">
+      <span style="font-size:22px;font-weight:800;color:#fff;letter-spacing:-0.5px;">
+        Quote<span style="color:#E85C2F;">Flow</span>
+      </span>
+    </td>
+  </tr>
+  `
+		footer = `<tr>
     <td style="background:#EDE9DF;padding:20px 36px;text-align:center;">
       <p style="margin:0;font-size:12px;color:#8A8278;">
         Powered by <strong>QuoteFlow</strong> · Professional quotes for Caribbean freelancers
       </p>
     </td>
   </tr>`
-	if whiteLabel {
-		footer = ""
 	}
 	return fmt.Sprintf(`<!DOCTYPE html>
 <html>
@@ -358,15 +368,7 @@ func quoteEmailHTML(d QuoteEmailData, whiteLabel bool) string {
 <table width="100%%" cellpadding="0" cellspacing="0">
 <tr><td align="center" style="padding:40px 20px;">
 <table width="560" style="background:#fff;border-radius:16px;overflow:hidden;border:1px solid #D8D3C8;">
-  <!-- Header -->
-  <tr>
-    <td style="background:#0D0D0D;padding:28px 36px;">
-      <span style="font-size:22px;font-weight:800;color:#fff;letter-spacing:-0.5px;">
-        Quote<span style="color:#E85C2F;">Flow</span>
-      </span>
-    </td>
-  </tr>
-  <!-- Body -->
+  %s<!-- Body -->
   <tr>
     <td style="padding:36px;">
       <p style="margin:0 0 8px;font-size:22px;font-weight:700;color:#0D0D0D;">
@@ -405,13 +407,13 @@ func quoteEmailHTML(d QuoteEmailData, whiteLabel bool) string {
       </p>
     </td>
   </tr>
-  <!-- Footer -->
   %s
 </table>
 </td></tr>
 </table>
 </body>
 </html>`,
+		headerRow,
 		d.ClientName, d.SenderName,
 		d.QuoteNumber, d.QuoteTitle,
 		d.Total, d.ExpiresAt,

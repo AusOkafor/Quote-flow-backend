@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"quoteflow-backend/config"
+	"quoteflow-backend/internal/copy"
 )
 
 // EmailService handles transactional emails (e.g. payment receipts).
@@ -41,6 +42,9 @@ type PaymentReceiptData struct {
 	QuoteNumber string // e.g. QF-012
 	QuoteURL    string // full URL to public quote page
 
+	// White-label: true for Business plan — removes QuoteFlow branding
+	WhiteLabel bool
+
 	// Amount
 	Amount   string // formatted: "J$13,900.00"
 	Currency string // JMD, USD, TTD, BBD
@@ -64,7 +68,7 @@ func (s *EmailService) SendPaymentReceiptEmail(data PaymentReceiptData) error {
 	}
 
 	html := paymentReceiptHTML(data, paidTo)
-	subject := fmt.Sprintf("Payment Receipt - %s", data.QuoteNumber)
+	subject := copy.ReceiptSubject(data.QuoteNumber)
 
 	type resendPayload struct {
 		From    string   `json:"from"`
@@ -104,6 +108,22 @@ func (s *EmailService) SendPaymentReceiptEmail(data PaymentReceiptData) error {
 }
 
 func paymentReceiptHTML(data PaymentReceiptData, paidTo string) string {
+	headerRow := ""
+	footerBlock := ""
+	if !data.WhiteLabel {
+		headerRow = `<tr>
+    <td style="background:#0D0D0D;padding:28px 36px;">
+      <span style="font-size:22px;font-weight:800;color:#fff;letter-spacing:-0.5px;">
+        Quote<span style="color:#E85C2F;">Flow</span>
+      </span>
+    </td>
+  </tr>
+  `
+		footerBlock = `<hr style="border:none;border-top:1px solid #E5E2DB;margin:24px 0 0;"/>
+      <p style="margin:16px 0 0;font-size:12px;color:#8A8278;text-align:center;">
+        QuoteFlow · Powered by QuoteFlow
+      </p>`
+	}
 	return fmt.Sprintf(`<!DOCTYPE html>
 <html>
 <head><meta charset="UTF-8"/></head>
@@ -111,14 +131,7 @@ func paymentReceiptHTML(data PaymentReceiptData, paidTo string) string {
 <table width="100%%" cellpadding="0" cellspacing="0">
 <tr><td align="center" style="padding:40px 20px;">
 <table width="560" style="background:#fff;border-radius:16px;overflow:hidden;border:1px solid #D8D3C8;">
-  <tr>
-    <td style="background:#0D0D0D;padding:28px 36px;">
-      <span style="font-size:22px;font-weight:800;color:#fff;letter-spacing:-0.5px;">
-        Quote<span style="color:#E85C2F;">Flow</span>
-      </span>
-    </td>
-  </tr>
-  <tr>
+  %s<tr>
     <td style="padding:36px;">
       <h2 style="margin:0 0 8px;font-size:22px;font-weight:700;color:#0D0D0D;">Payment Receipt</h2>
       <hr style="border:none;border-top:1px solid #E5E2DB;margin:0 0 24px;"/>
@@ -143,14 +156,11 @@ func paymentReceiptHTML(data PaymentReceiptData, paidTo string) string {
       <p style="margin:0 0 24px;font-size:14px;color:#555;">Paid to: <strong>%s</strong></p>
       <div style="text-align:center;margin-bottom:28px;">
         <a href="%s" style="display:inline-block;background:#2DAB6F;color:#fff;padding:15px 40px;border-radius:10px;text-decoration:none;font-size:16px;font-weight:600;">
-          View Quote →
+          %s
         </a>
       </div>
       <p style="margin:0;font-size:14px;color:#555;">Thank you for your payment.</p>
-      <hr style="border:none;border-top:1px solid #E5E2DB;margin:24px 0 0;"/>
-      <p style="margin:16px 0 0;font-size:12px;color:#8A8278;text-align:center;">
-        QuoteFlow · Powered by QuoteFlow
-      </p>
+      %s
     </td>
   </tr>
 </table>
@@ -165,8 +175,18 @@ func paymentReceiptHTML(data PaymentReceiptData, paidTo string) string {
 		html.EscapeString(data.PaymentType),
 		html.EscapeString(data.Processor),
 		html.EscapeString(data.TransactionID),
+		headerRow,
+		html.EscapeString(data.ClientName),
+		html.EscapeString(data.ReceiptNumber),
+		html.EscapeString(data.PaymentDate),
+		html.EscapeString(data.Amount),
+		html.EscapeString(data.PaymentType),
+		html.EscapeString(data.Processor),
+		html.EscapeString(data.TransactionID),
 		html.EscapeString(data.QuoteNumber),
 		html.EscapeString(paidTo),
 		data.QuoteURL,
+		copy.ViewQuoteCTA,
+		footerBlock,
 	)
 }

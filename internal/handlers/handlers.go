@@ -1508,6 +1508,7 @@ func (h *Handler) handlePaymentConfirmed(ctx context.Context, quoteID string, pa
 					freelancerName = profile.Profession
 				}
 			}
+			whiteLabel := profile != nil && profile.Plan == "business"
 			receiptData := services.PaymentReceiptData{
 				ClientName:     quote.Client.Name,
 				ClientEmail:    quote.Client.Email,
@@ -1520,6 +1521,7 @@ func (h *Handler) handlePaymentConfirmed(ctx context.Context, quoteID string, pa
 				PaymentType:    formatPaymentType(payment.PaymentType),
 				QuoteNumber:    quote.QuoteNumber,
 				QuoteURL:       fmt.Sprintf("%s/q/%s", strings.TrimSuffix(h.cfg.FrontendURL, "/"), quote.ShareToken),
+				WhiteLabel:     whiteLabel,
 				Amount:         formatAmount(payment.Amount, payment.Currency),
 				Currency:       payment.Currency,
 			}
@@ -2168,11 +2170,12 @@ func (h *Handler) PublicGetQuote(w http.ResponseWriter, r *http.Request) {
 		defaultPaymentTiming = profile.DefaultPaymentTiming
 	}
 	type creatorInfo struct {
-		LogoURL             *string  `json:"logo_url,omitempty"`
-		BusinessName        string   `json:"business_name,omitempty"`
-		BrandColor         string   `json:"brand_color,omitempty"`
-		WhiteLabel         bool     `json:"white_label,omitempty"`
-		DefaultPaymentTiming string `json:"default_payment_timing,omitempty"`
+		LogoURL              *string `json:"logo_url,omitempty"`
+		BusinessName         string  `json:"business_name,omitempty"`
+		BrandColor           string  `json:"brand_color,omitempty"`
+		WhiteLabel           bool    `json:"white_label,omitempty"`
+		FreelancerPlan       string  `json:"freelancer_plan,omitempty"`
+		DefaultPaymentTiming string  `json:"default_payment_timing,omitempty"`
 	}
 	out := struct {
 		models.QuoteWithDetails
@@ -2180,11 +2183,16 @@ func (h *Handler) PublicGetQuote(w http.ResponseWriter, r *http.Request) {
 		PaymentProcessors []string    `json:"payment_processors,omitempty"`
 	}{QuoteWithDetails: *quote, PaymentProcessors: paymentProcessors}
 	if profile != nil {
+		plan := "free"
+		if profile.Plan != "" {
+			plan = profile.Plan
+		}
 		out.Creator = &creatorInfo{
 			LogoURL:              profile.LogoURL,
 			BusinessName:         profile.BusinessName,
 			BrandColor:           profile.BrandColor,
-			WhiteLabel:           profile.Plan == "business",
+			WhiteLabel:           plan == "business",
+			FreelancerPlan:       plan,
 			DefaultPaymentTiming: defaultPaymentTiming,
 		}
 	}
