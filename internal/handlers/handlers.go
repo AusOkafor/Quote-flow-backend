@@ -1240,14 +1240,14 @@ func (h *Handler) StripePaymentWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 	event, err := webhook.ConstructEventWithOptions(body, sig, h.cfg.StripePaymentWebhookSecret, opts)
 	if err != nil {
-		log.Printf("[webhook] stripe-payment: signature failed — err=%v | sigPresent=%v | secretLen=%d", err, sig != "", len(h.cfg.StripePaymentWebhookSecret))
+		log.Printf("[webhook] stripe-payment: signature verification failed")
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
 	if event.Type == "checkout.session.completed" {
 		var sess stripe.CheckoutSession
 		if err := json.Unmarshal(event.Data.Raw, &sess); err != nil {
-			log.Printf("[webhook] stripe-payment: failed to unmarshal session: %v", err)
+			log.Printf("[webhook] stripe-payment: failed to unmarshal session")
 			w.WriteHeader(http.StatusOK)
 			return
 		}
@@ -1411,9 +1411,6 @@ func (h *Handler) WiPayWebhook(w http.ResponseWriter, r *http.Request) {
 		if err == nil {
 			apiKey := account.WiPayAPIKey // GetPaymentAccountFull returns decrypted
 			if apiKey != "" {
-				expectedHash := fmt.Sprintf("%x", md5.Sum([]byte(transactionID+apiKey)))
-				log.Printf("[WiPay] hash debug: transaction_id=%s api_key_len=%d computed=%s received=%s",
-					transactionID, len(apiKey), expectedHash, hash)
 				if !verifyWiPayHash(transactionID, apiKey, hash) {
 					log.Printf("[WiPay] webhook: hash mismatch — continuing anyway (sandbox mode)")
 					// TODO: enforce strictly in production with real credentials
@@ -2148,12 +2145,17 @@ func (h *Handler) PublicGetQuote(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if quote.TrackViews {
+		quoteID := quote.ID
+		userID := quote.UserID
+		clientName := quote.Client.Name
+		quoteNumber := quote.QuoteNumber
+		viewCount := quote.ViewCount
 		go func() {
 			bgCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			defer cancel()
-			_ = h.db.IncrementViewCount(bgCtx, quote.ID)
-			if profile, err := h.db.GetProfile(bgCtx, quote.UserID); err == nil {
-				_ = h.notif.SendQuoteViewedNotification(&quote.Quote, quote.Client.Name, profile.EmailOnQuote)
+			_ = h.db.IncrementViewCount(bgCtx, quoteID)
+			if profile, err := h.db.GetProfile(bgCtx, userID); err == nil {
+				_ = h.notif.SendQuoteViewedNotification(&models.Quote{QuoteNumber: quoteNumber, ViewCount: viewCount}, clientName, profile.EmailOnQuote)
 			}
 		}()
 	}
@@ -2202,27 +2204,31 @@ func (h *Handler) PublicAcceptQuote(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	quoteID := quote.ID
+	userID := quote.UserID
+	quoteNumber := quote.QuoteNumber
+	acceptedByName := quote.AcceptedByName
 	go func() {
 		bgCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
-		fullQuote, err := h.db.GetQuote(bgCtx, quote.ID, quote.UserID)
+		fullQuote, err := h.db.GetQuote(bgCtx, quoteID, userID)
 		if err != nil {
 			return
 		}
-		profile, err := h.db.GetProfile(bgCtx, quote.UserID)
+		profile, err := h.db.GetProfile(bgCtx, userID)
 		if err != nil {
 			return
 		}
 		_ = h.notif.SendQuoteAcceptedNotification(fullQuote, profile.EmailOnQuote)
-		signer := quote.AcceptedByName
+		signer := acceptedByName
 		if signer == "" && fullQuote.Client.Name != "" {
 			signer = fullQuote.Client.Name
 		}
 		if signer == "" {
 			signer = "Client"
 		}
-		_ = h.db.LogEvent(bgCtx, quote.UserID, quote.ID, "accepted",
-			fmt.Sprintf("%s accepted quote %s", signer, quote.QuoteNumber))
+		_ = h.db.LogEvent(bgCtx, userID, quoteID, "accepted",
+			fmt.Sprintf("%s accepted quote %s", signer, quoteNumber))
 	}()
 
 	h.ok(w, map[string]interface{}{
