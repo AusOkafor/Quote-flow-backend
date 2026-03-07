@@ -1175,6 +1175,7 @@ func (h *Handler) CreateCheckoutSession(w http.ResponseWriter, r *http.Request) 
 		Customer:          stripe.String(customerID),
 		ClientReferenceID: stripe.String(user.ID),
 		Mode:              stripe.String(string(stripe.CheckoutSessionModeSubscription)),
+		Currency:          stripe.String("usd"),
 		SuccessURL:        stripe.String(successURL),
 		CancelURL:         stripe.String(cancelURL),
 		Metadata:          map[string]string{"plan": req.Plan},
