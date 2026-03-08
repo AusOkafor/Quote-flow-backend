@@ -2111,11 +2111,22 @@ func (db *DB) UpdateAPIKeyLastUsed(ctx context.Context, id string) error {
 // GetUsersForWeeklyDigest returns users with notify_weekly = true.
 func (db *DB) GetUsersForWeeklyDigest(ctx context.Context) ([]models.DigestUser, error) {
 	raw := db.client.Rpc("get_users_for_weekly_digest", "", map[string]interface{}{})
-	if raw == "" {
+	if raw == "" || raw == "null" {
 		return []models.DigestUser{}, nil
 	}
 	var rows []models.DigestUser
 	if err := json.Unmarshal([]byte(raw), &rows); err != nil {
+		// PostgREST/Supabase may return {"data": [...]} or single object
+		var wrapped struct {
+			Data []models.DigestUser `json:"data"`
+		}
+		if wrapErr := json.Unmarshal([]byte(raw), &wrapped); wrapErr == nil && len(wrapped.Data) > 0 {
+			return wrapped.Data, nil
+		}
+		var single models.DigestUser
+		if singleErr := json.Unmarshal([]byte(raw), &single); singleErr == nil && single.ID != "" {
+			return []models.DigestUser{single}, nil
+		}
 		return nil, fmt.Errorf("decode digest users: %w", err)
 	}
 	return rows, nil
