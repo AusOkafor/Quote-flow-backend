@@ -299,7 +299,7 @@ func weeklyDigestHTML(data WeeklyDigestData) string {
 
       <div style="text-align:center;margin:28px 0;padding:24px;background:rgba(232,92,47,.08);border-radius:12px;">
         <div style="font-size:28px;font-weight:800;color:#E85C2F;">%s</div>
-        <div style="font-size:14px;color:#8A8278;margin-top:4px;">received this week</div>
+        <div style="font-size:14px;color:#8A8278;margin-top:4px;">collected via QuoteFlow this week</div>
       </div>
 
       %s
