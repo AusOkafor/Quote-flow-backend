@@ -20,6 +20,21 @@ type NotificationService struct {
 	cfg *config.Config
 }
 
+// formatMoney formats an amount with thousands separators and the currency code.
+// e.g. formatMoney(464600, "JMD") → "JMD 464,600.00"
+func formatMoney(amount float64, currency string) string {
+	parts := strings.Split(fmt.Sprintf("%.2f", amount), ".")
+	intPart := parts[0]
+	var b strings.Builder
+	for i := 0; i < len(intPart); i++ {
+		if i > 0 && (len(intPart)-i)%3 == 0 {
+			b.WriteByte(',')
+		}
+		b.WriteByte(intPart[i])
+	}
+	return currency + " " + b.String() + "." + parts[1]
+}
+
 func NewNotificationService(cfg *config.Config) *NotificationService {
 	return &NotificationService{cfg: cfg}
 }
@@ -81,7 +96,7 @@ func (n *NotificationService) SendQuoteByEmail(quote *models.QuoteWithDetails, r
 		SenderName:  senderName,
 		QuoteTitle:  quote.Title,
 		QuoteNumber: quote.QuoteNumber,
-		Total:       fmt.Sprintf("%s %.2f", quote.Currency, quote.Total),
+		Total:       formatMoney(quote.Total, quote.Currency),
 		QuoteURL:    quoteURL,
 		ExpiresAt:   expiryStr,
 	}, whiteLabel)
@@ -101,13 +116,13 @@ func (n *NotificationService) SendQuoteAcceptedNotification(quote *models.QuoteW
 	<div style="font-family:sans-serif;max-width:560px;margin:0 auto;padding:32px;">
 	  <h2 style="color:#2DAB6F;margin-bottom:8px;">🎉 Quote Accepted!</h2>
 	  <p style="color:#555;font-size:15px;line-height:1.6;">
-	    <strong>%s</strong> has accepted your quote <strong>%s</strong> for <strong>%s %.2f</strong>.
+	    <strong>%s</strong> has accepted your quote <strong>%s</strong> for <strong>%s</strong>.
 	  </p>
 	  <p style="color:#555;font-size:14px;">Log in to QuoteFlow to convert it to an invoice or follow up.</p>
 	  <a href="%s/app" style="display:inline-block;margin-top:20px;background:#E85C2F;color:#fff;padding:13px 28px;border-radius:8px;text-decoration:none;font-weight:600;">
 	    View in QuoteFlow →
 	  </a>
-	</div>`, quote.Client.Name, quote.QuoteNumber, quote.Currency, quote.Total, n.cfg.AppURL)
+	</div>`, quote.Client.Name, quote.QuoteNumber, formatMoney(quote.Total, quote.Currency), n.cfg.AppURL)
 
 	subject := fmt.Sprintf("✅ %s accepted your quote %s", quote.Client.Name, quote.QuoteNumber)
 	return n.sendEmail(freelancerEmail, subject, html)
@@ -167,11 +182,11 @@ func (n *NotificationService) SendPaymentReceivedNotification(quote *models.Quot
   </p>
   <div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:20px;margin-bottom:24px;">
     <table style="width:100%%;font-size:14px;color:#374151;">
-      <tr><td>Amount paid</td>    <td align="right"><strong>%s %.2f</strong></td></tr>
-      <tr><td>QuoteFlow fee (0.7%%)</td><td align="right" style="color:#9ca3af;">-%s %.2f</td></tr>
+      <tr><td>Amount paid</td>    <td align="right"><strong>%s</strong></td></tr>
+      <tr><td>QuoteFlow fee (0.7%%)</td><td align="right" style="color:#9ca3af;">-%s</td></tr>
       <tr style="border-top:1px solid #d1fae5;">
         <td><strong>Net to you</strong></td>
-        <td align="right"><strong style="color:#16a34a;">%s %.2f</strong></td>
+        <td align="right"><strong style="color:#16a34a;">%s</strong></td>
       </tr>
     </table>
   </div>
@@ -181,14 +196,14 @@ func (n *NotificationService) SendPaymentReceivedNotification(quote *models.Quot
   </a>
 </div>`,
 		quote.Client.Name, typeLabel, quote.QuoteNumber, quote.Title, processorLabel,
-		payment.Currency, payment.Amount,
-		payment.Currency, payment.PlatformFee,
-		payment.Currency, payment.NetAmount,
+		formatMoney(payment.Amount, payment.Currency),
+		formatMoney(payment.PlatformFee, payment.Currency),
+		formatMoney(payment.NetAmount, payment.Currency),
 		appURL,
 	)
 
-	subject := fmt.Sprintf("💰 %s paid %s %.2f — %s",
-		quote.Client.Name, payment.Currency, payment.Amount, quote.QuoteNumber)
+	subject := fmt.Sprintf("💰 %s paid %s — %s",
+		quote.Client.Name, formatMoney(payment.Amount, payment.Currency), quote.QuoteNumber)
 	return n.sendEmail(freelancerEmail, subject, html)
 }
 
@@ -234,11 +249,11 @@ func (n *NotificationService) SendExpiryReminderToClient(quote *models.QuoteWith
 	  <p style="color:#555;font-size:15px;line-height:1.6;">
 	    Hi %s, your quote <strong>%s</strong> from <strong>%s</strong> expires on <strong>%s</strong>.
 	  </p>
-	  <p style="color:#555;font-size:14px;">Total: <strong>%s %.2f</strong></p>
+	  <p style="color:#555;font-size:14px;">Total: <strong>%s</strong></p>
 	  <a href="%s" style="display:inline-block;margin-top:20px;background:#2DAB6F;color:#fff;padding:13px 28px;border-radius:8px;text-decoration:none;font-weight:600;">
 	    View &amp; Accept Quote →
 	  </a>
-	</div>`, quote.Client.Name, quote.QuoteNumber, senderName, expiryStr, quote.Currency, quote.Total, quoteURL)
+	</div>`, quote.Client.Name, quote.QuoteNumber, senderName, expiryStr, formatMoney(quote.Total, quote.Currency), quoteURL)
 	subject := fmt.Sprintf("⏰ Quote %s expires soon — %s", quote.QuoteNumber, quote.Title)
 	return n.sendEmail(to, subject, html)
 }
@@ -251,11 +266,11 @@ func (n *NotificationService) SendExpiringSoonToFreelancer(quote *models.QuoteWi
 	  <p style="color:#555;font-size:15px;line-height:1.6;">
 	    Your quote <strong>%s</strong> for <strong>%s</strong> expires in 3 days.
 	  </p>
-	  <p style="color:#555;font-size:14px;">Total: <strong>%s %.2f</strong></p>
+	  <p style="color:#555;font-size:14px;">Total: <strong>%s</strong></p>
 	  <a href="%s/app" style="display:inline-block;margin-top:20px;background:#E85C2F;color:#fff;padding:13px 28px;border-radius:8px;text-decoration:none;font-weight:600;">
 	    View in QuoteFlow →
 	  </a>
-	</div>`, quote.QuoteNumber, quote.Client.Name, quote.Currency, quote.Total, n.cfg.AppURL)
+	</div>`, quote.QuoteNumber, quote.Client.Name, formatMoney(quote.Total, quote.Currency), n.cfg.AppURL)
 	subject := fmt.Sprintf("⏰ Quote %s expires in 3 days", quote.QuoteNumber)
 	return n.sendEmail(freelancerEmail, subject, html)
 }
@@ -275,14 +290,13 @@ func (n *NotificationService) SendQuoteViaWhatsApp(quote *models.QuoteWithDetail
 		"Hi %s! 👋\n\n"+
 			"*%s* has sent you a quote:\n\n"+
 			"📋 *%s*\n"+
-			"💰 Total: *%s %.2f*\n"+
+			"💰 Total: *%s*\n"+
 			"📅 Valid until: %s\n\n"+
 			"Tap the link below to view and accept:\n%s",
 		quote.Client.Name,
 		senderName,
 		quote.Title,
-		quote.Currency,
-		quote.Total,
+		formatMoney(quote.Total, quote.Currency),
 		quote.ExpiresAt.Format("January 2, 2006"),
 		quoteURL,
 	)
