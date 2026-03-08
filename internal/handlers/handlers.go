@@ -2239,6 +2239,21 @@ func (h *Handler) PublicGetQuote(w http.ResponseWriter, r *http.Request) {
 	if profile != nil && profile.DefaultPaymentTiming != "" {
 		defaultPaymentTiming = profile.DefaultPaymentTiming
 	}
+	accounts, _ := h.db.ListPaymentAccounts(r.Context(), quote.UserID)
+	stripeConnected := false
+	wipayConnected := false
+	paypalConnected := false
+	for _, a := range accounts {
+		if a.Processor == models.ProcessorStripe && a.StripeAccountID != "" {
+			stripeConnected = true
+		}
+		if a.Processor == models.ProcessorWiPay && a.WiPayAccountID != "" {
+			wipayConnected = true
+		}
+		if a.Processor == models.ProcessorPayPal && a.PayPalMerchantID != "" {
+			paypalConnected = true
+		}
+	}
 	type creatorInfo struct {
 		LogoURL              *string `json:"logo_url,omitempty"`
 		BusinessName         string  `json:"business_name,omitempty"`
@@ -2246,6 +2261,9 @@ func (h *Handler) PublicGetQuote(w http.ResponseWriter, r *http.Request) {
 		WhiteLabel           bool    `json:"white_label,omitempty"`
 		FreelancerPlan       string  `json:"freelancer_plan,omitempty"`
 		DefaultPaymentTiming string  `json:"default_payment_timing,omitempty"`
+		StripeConnected      bool    `json:"stripe_connected,omitempty"`
+		WiPayConnected      bool    `json:"wipay_connected,omitempty"`
+		PayPalConnected      bool    `json:"paypal_connected,omitempty"`
 	}
 	out := struct {
 		models.QuoteWithDetails
@@ -2264,6 +2282,9 @@ func (h *Handler) PublicGetQuote(w http.ResponseWriter, r *http.Request) {
 			WhiteLabel:           plan == "business",
 			FreelancerPlan:       plan,
 			DefaultPaymentTiming: defaultPaymentTiming,
+			StripeConnected:      stripeConnected,
+			WiPayConnected:      wipayConnected,
+			PayPalConnected:      paypalConnected,
 		}
 	}
 	h.ok(w, &out)
