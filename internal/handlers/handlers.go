@@ -1449,7 +1449,7 @@ func (h *Handler) WiPayWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Step 4 — Hash verification (production only)
+	// Step 4 — Hash verification (production only; sandbox uses internal WiPay keys we don't have)
 	if !h.cfg.WiPaySandbox {
 		if transactionID == "" || hash == "" {
 			log.Printf("[WiPay] webhook: missing transaction_id or hash — rejected")
@@ -1463,11 +1463,8 @@ func (h *Handler) WiPayWebhook(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		log.Printf("[WiPay] webhook: hash verified ok")
-	} else if transactionID != "" && hash != "" {
-		expectedHash := fmt.Sprintf("%x", md5.Sum([]byte(transactionID+account.WiPayAPIKey)))
-		if !strings.EqualFold(hash, expectedHash) {
-			log.Printf("[WiPay] webhook: hash mismatch (sandbox) got=%s expected=%s", hash, expectedHash)
-		}
+	} else {
+		log.Printf("[WiPay] webhook: sandbox mode — skipping hash verification")
 	}
 
 	// Step 5 — Amount verification (prevent lower-amount confirmation)
