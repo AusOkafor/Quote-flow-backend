@@ -37,12 +37,15 @@ var digestTips = []string{
 
 // SendWeeklyDigests sends weekly digest emails to all users with notify_weekly = true.
 func (s *Service) SendWeeklyDigests(ctx context.Context) error {
+	log.Printf("[Digest] starting weekly digest")
+
 	users, err := s.db.GetUsersForWeeklyDigest(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to get digest users: %w", err)
+		log.Printf("[Digest] failed to get users: %v", err)
+		return err
 	}
 
-	log.Printf("[Digest] sending weekly digest to %d users", len(users))
+	log.Printf("[Digest] found %d users with notify_weekly=true", len(users))
 
 	weekStart := getLastMonday().AddDate(0, 0, -7)
 	weekEnd := getLastMonday().AddDate(0, 0, -1)
