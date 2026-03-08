@@ -26,6 +26,7 @@ import (
 	"github.com/stripe/stripe-go/v76/customer"
 	"github.com/stripe/stripe-go/v76/webhook"
 	"quoteflow-backend/config"
+	"quoteflow-backend/internal/digest"
 	"quoteflow-backend/internal/middleware"
 	"quoteflow-backend/internal/models"
 	"quoteflow-backend/internal/repository"
@@ -41,11 +42,12 @@ type Handler struct {
 	auth     *services.AuthService
 	payments *services.PaymentService
 	email    *services.EmailService
+	digest   *digest.Service
 	cfg      *config.Config
 }
 
-func New(db *repository.DB, notif *services.NotificationService, auth *services.AuthService, payments *services.PaymentService, email *services.EmailService, cfg *config.Config) *Handler {
-	return &Handler{db: db, notif: notif, auth: auth, payments: payments, email: email, cfg: cfg}
+func New(db *repository.DB, notif *services.NotificationService, auth *services.AuthService, payments *services.PaymentService, email *services.EmailService, digest *digest.Service, cfg *config.Config) *Handler {
+	return &Handler{db: db, notif: notif, auth: auth, payments: payments, email: email, digest: digest, cfg: cfg}
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -302,6 +304,36 @@ func (h *Handler) CronReminders(w http.ResponseWriter, r *http.Request) {
 		"sent":   sent,
 		"errors": errs,
 	})
+}
+
+// POST /internal/cron/digest-weekly — sends weekly digest emails.
+// Protected by CRON_SECRET. Invoke via external cron every Monday 8am Jamaica (13:00 UTC).
+func (h *Handler) CronWeeklyDigest(w http.ResponseWriter, r *http.Request) {
+	if h.digest == nil {
+		h.err(w, http.StatusInternalServerError, "digest service not configured")
+		return
+	}
+	if err := h.digest.SendWeeklyDigests(r.Context()); err != nil {
+		h.err(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	h.ok(w, map[string]interface{}{"message": "weekly digest sent"})
+}
+
+// POST /admin/digest/weekly — manual trigger for testing. Requires Authorization: Bearer <ADMIN_SECRET>.
+func (h *Handler) TriggerWeeklyDigest(w http.ResponseWriter, r *http.Request) {
+	auth := r.Header.Get("Authorization")
+	if auth != "Bearer "+h.cfg.AdminSecret {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if h.digest == nil {
+		http.Error(w, "digest service not configured", http.StatusInternalServerError)
+		return
+	}
+	go h.digest.SendWeeklyDigests(context.Background())
+	w.Header().Set("Content-Type", "application/json")
+	w.Write([]byte(`{"message":"digest triggered"}`))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

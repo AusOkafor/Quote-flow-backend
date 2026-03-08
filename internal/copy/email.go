@@ -24,6 +24,11 @@ func TeamInviteSubject(businessName string) string {
 	return fmt.Sprintf("You have been invited to join %s on QuoteFlow", businessName)
 }
 
+// WeeklyDigestSubject returns the subject for weekly digest emails.
+func WeeklyDigestSubject(weekEnd string) string {
+	return fmt.Sprintf("Your QuoteFlow Weekly Summary — %s", weekEnd)
+}
+
 // CTAs
 const (
 	ViewQuoteCTA     = "View Quote →"

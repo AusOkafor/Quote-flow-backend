@@ -506,6 +506,35 @@ type ConnectPayPalRequest struct {
 	AccessToken string `json:"access_token" validate:"required"`
 }
 
+// DigestUser holds user data for weekly digest (from GetUsersForWeeklyDigest).
+type DigestUser struct {
+	ID           string `json:"user_id" db:"user_id"`
+	Email        string `json:"email" db:"email"`
+	FirstName    string `json:"first_name" db:"first_name"`
+	BusinessName string `json:"business_name" db:"business_name"`
+	Currency     string `json:"currency" db:"currency"`
+}
+
+// WeeklyDigestStats holds stats for a user's weekly digest.
+type WeeklyDigestStats struct {
+	QuotesSent       int
+	QuotesAccepted   int
+	QuotesViewed     int
+	PaymentsReceived int
+	TotalEarned      float64
+	ExpiringQuotes   []DigestQuote
+	AcceptedQuotes   []DigestQuote
+}
+
+// DigestQuote holds a quote summary for the digest email.
+type DigestQuote struct {
+	QuoteNumber string `json:"quote_number"`
+	ClientName  string `json:"client_name"`
+	Amount      string `json:"amount"`
+	ExpiryDate  string `json:"expiry_date"`
+	URL         string `json:"url"`
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // AUTH
 // ─────────────────────────────────────────────────────────────────────────────

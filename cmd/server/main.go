@@ -13,8 +13,10 @@ import (
 	"github.com/go-chi/chi/v5"
 	chimiddleware "github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/cors"
+	"github.com/robfig/cron/v3"
 
 	"quoteflow-backend/config"
+	"quoteflow-backend/internal/digest"
 	"quoteflow-backend/internal/handlers"
 	"quoteflow-backend/internal/middleware"
 	"quoteflow-backend/internal/repository"
@@ -40,7 +42,8 @@ func main() {
 	auth     := services.NewAuthService(cfg)
 	payments := services.NewPaymentService(cfg)
 	email    := services.NewEmailService(cfg)
-	h        := handlers.New(db, notif, auth, payments, email, cfg)
+	digestSvc := digest.NewService(db, email, cfg)
+	h        := handlers.New(db, notif, auth, payments, email, digestSvc, cfg)
 
 	jwtVerifier, err := middleware.NewJWTVerifier(cfg)
 	if err != nil {
@@ -86,7 +89,13 @@ func main() {
 	r.Route("/internal/cron", func(r chi.Router) {
 		r.Use(middleware.RequireCronSecret(cfg))
 		r.Post("/reminders", h.CronReminders)
+		r.Post("/digest-weekly", h.CronWeeklyDigest)
 	})
+
+	// Admin (ADMIN_SECRET auth) — manual digest trigger for testing
+	if cfg.AdminSecret != "" {
+		r.Post("/admin/digest/weekly", h.TriggerWeeklyDigest)
+	}
 
 	// Stripe webhook (no auth, verify Stripe signature)
 	r.With(apiLimiter.Limit).Post("/billing/webhook", h.StripeWebhook)
@@ -208,6 +217,20 @@ func main() {
 		ReadTimeout:  15 * time.Second,
 		WriteTimeout: 30 * time.Second,
 		IdleTimeout:  120 * time.Second,
+	}
+
+	// Weekly digest cron — Mondays at 8:00 AM Jamaica time (UTC-5 = 13:00 UTC)
+	c := cron.New()
+	if _, err := c.AddFunc("0 13 * * 1", func() {
+		log.Println("[Cron] running weekly digest")
+		if err := digestSvc.SendWeeklyDigests(context.Background()); err != nil {
+			log.Printf("[Cron] weekly digest error: %v", err)
+		}
+	}); err != nil {
+		log.Printf("[Cron] failed to add weekly digest job: %v", err)
+	} else {
+		c.Start()
+		log.Println("[Cron] weekly digest scheduled for Mondays 13:00 UTC")
 	}
 
 	// Start in background, block on OS signal

@@ -2103,3 +2103,199 @@ func (db *DB) UpdateAPIKeyLastUsed(ctx context.Context, id string) error {
 		Execute()
 	return err
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WEEKLY DIGEST
+// ─────────────────────────────────────────────────────────────────────────────
+
+// GetUsersForWeeklyDigest returns users with notify_weekly = true.
+func (db *DB) GetUsersForWeeklyDigest(ctx context.Context) ([]models.DigestUser, error) {
+	raw := db.client.Rpc("get_users_for_weekly_digest", "", map[string]interface{}{})
+	if raw == "" {
+		return []models.DigestUser{}, nil
+	}
+	var rows []models.DigestUser
+	if err := json.Unmarshal([]byte(raw), &rows); err != nil {
+		return nil, fmt.Errorf("decode digest users: %w", err)
+	}
+	return rows, nil
+}
+
+// GetWeeklyDigestStats returns stats for a user's weekly digest.
+func (db *DB) GetWeeklyDigestStats(ctx context.Context, userID string, weekStart, weekEnd time.Time) (*models.WeeklyDigestStats, error) {
+	teamID, uid := db.userOrTeamFilter(ctx, userID)
+	quoteFilter := "user_id"
+	quoteVal := uid
+	if teamID != "" {
+		quoteFilter = "team_id"
+		quoteVal = teamID
+	}
+
+	weekStartStr := weekStart.Format(time.RFC3339)
+	weekEndStr := weekEnd.Format(time.RFC3339)
+
+	// Quotes sent (created in week)
+	sentRaw, _, err := db.client.From("quotes").
+		Select("id", "exact", false).
+		Eq(quoteFilter, quoteVal).
+		Gte("created_at", weekStartStr).
+		Lte("created_at", weekEndStr).
+		Execute()
+	if err != nil {
+		return nil, fmt.Errorf("quotes sent: %w", err)
+	}
+	var sentRows []struct{ ID string `json:"id"` }
+	_ = decode(sentRaw, &sentRows)
+	quotesSent := len(sentRows)
+
+	// Quotes accepted (accepted_at in week)
+	accRaw, _, err := db.client.From("quotes").
+		Select("id", "exact", false).
+		Eq(quoteFilter, quoteVal).
+		Eq("status", "accepted").
+		Gte("accepted_at", weekStartStr).
+		Lte("accepted_at", weekEndStr).
+		Execute()
+	if err != nil {
+		return nil, fmt.Errorf("quotes accepted: %w", err)
+	}
+	var accRows []struct{ ID string `json:"id"` }
+	_ = decode(accRaw, &accRows)
+	quotesAccepted := len(accRows)
+
+	// Quotes viewed (last_viewed_at in week)
+	viewRaw, _, err := db.client.From("quotes").
+		Select("id", "exact", false).
+		Eq(quoteFilter, quoteVal).
+		Not("last_viewed_at", "is", "null").
+		Gte("last_viewed_at", weekStartStr).
+		Lte("last_viewed_at", weekEndStr).
+		Execute()
+	if err != nil {
+		return nil, fmt.Errorf("quotes viewed: %w", err)
+	}
+	var viewRows []struct{ ID string `json:"id"` }
+	_ = decode(viewRaw, &viewRows)
+	quotesViewed := len(viewRows)
+
+	// Payments received (paid in week)
+	payRaw, _, err := db.client.From("payments").
+		Select("amount", "exact", false).
+		Eq("user_id", userID).
+		Eq("status", "paid").
+		Gte("paid_at", weekStartStr).
+		Lte("paid_at", weekEndStr).
+		Execute()
+	if err != nil {
+		return nil, fmt.Errorf("payments: %w", err)
+	}
+	var payRows []struct{ Amount float64 `json:"amount"` }
+	_ = decode(payRaw, &payRows)
+	paymentsReceived := len(payRows)
+	var totalEarned float64
+	for _, r := range payRows {
+		totalEarned += r.Amount
+	}
+
+	// Expiring quotes (expires in next 7 days, status not accepted)
+	expiringEnd := time.Now().AddDate(0, 0, 7)
+	expRaw, _, err := db.client.From("quotes").
+		Select("quote_number,share_token,expires_at,total,currency,client:clients(name)", "exact", false).
+		Eq(quoteFilter, quoteVal).
+		Gte("expires_at", time.Now().Format(time.RFC3339)).
+		Lte("expires_at", expiringEnd.Format(time.RFC3339)).
+		Not("status", "eq", "accepted").
+		Order("expires_at", &postgrest.OrderOpts{Ascending: true}).
+		Limit(3, "").
+		Execute()
+	if err != nil {
+		return nil, fmt.Errorf("expiring: %w", err)
+	}
+	var expiringRows []struct {
+		QuoteNumber string    `json:"quote_number"`
+		ShareToken  string    `json:"share_token"`
+		ExpiresAt   time.Time `json:"expires_at"`
+		Total       float64   `json:"total"`
+		Currency    string    `json:"currency"`
+		Client      struct {
+			Name string `json:"name"`
+		} `json:"client"`
+	}
+	_ = decode(expRaw, &expiringRows)
+	expiringQuotes := make([]models.DigestQuote, 0, len(expiringRows))
+	quoteBase := strings.TrimSuffix(db.cfg.QuoteLinkBaseURL, "/")
+	for _, r := range expiringRows {
+		expiringQuotes = append(expiringQuotes, models.DigestQuote{
+			QuoteNumber: r.QuoteNumber,
+			ClientName:  r.Client.Name,
+			Amount:      formatCurrency(r.Total, r.Currency),
+			ExpiryDate:  r.ExpiresAt.Format("Jan 2, 2006"),
+			URL:         quoteBase + "/" + r.ShareToken,
+		})
+	}
+
+	// Accepted quotes this week (up to 3)
+	accDetailRaw, _, err := db.client.From("quotes").
+		Select("quote_number,total,currency,client:clients(name)", "exact", false).
+		Eq(quoteFilter, quoteVal).
+		Eq("status", "accepted").
+		Gte("accepted_at", weekStartStr).
+		Lte("accepted_at", weekEndStr).
+		Order("accepted_at", &postgrest.OrderOpts{Ascending: false}).
+		Limit(3, "").
+		Execute()
+	if err != nil {
+		return nil, fmt.Errorf("accepted: %w", err)
+	}
+	var accDetailRows []struct {
+		QuoteNumber string  `json:"quote_number"`
+		Total       float64 `json:"total"`
+		Currency    string  `json:"currency"`
+		Client      struct {
+			Name string `json:"name"`
+		} `json:"client"`
+	}
+	_ = decode(accDetailRaw, &accDetailRows)
+	acceptedQuotes := make([]models.DigestQuote, 0, len(accDetailRows))
+	for _, r := range accDetailRows {
+		acceptedQuotes = append(acceptedQuotes, models.DigestQuote{
+			QuoteNumber: r.QuoteNumber,
+			ClientName:  r.Client.Name,
+			Amount:      formatCurrency(r.Total, r.Currency),
+		})
+	}
+
+	return &models.WeeklyDigestStats{
+		QuotesSent:       quotesSent,
+		QuotesAccepted:   quotesAccepted,
+		QuotesViewed:     quotesViewed,
+		PaymentsReceived: paymentsReceived,
+		TotalEarned:      totalEarned,
+		ExpiringQuotes:   expiringQuotes,
+		AcceptedQuotes:   acceptedQuotes,
+	}, nil
+}
+
+func formatCurrency(amount float64, currency string) string {
+	sym := "J$"
+	switch currency {
+	case "USD":
+		sym = "$"
+	case "TTD":
+		sym = "TT$"
+	case "BBD":
+		sym = "Bds$"
+	case "GYD":
+		sym = "G$"
+	}
+	return fmt.Sprintf("%s%s", sym, formatAmount(amount))
+}
+
+func formatAmount(amount float64) string {
+	return fmt.Sprintf("%.2f", amount)
+}
+
+// FormatAmountForCurrency formats amount with currency symbol for display.
+func FormatAmountForCurrency(amount float64, currency string) string {
+	return formatCurrency(amount, currency)
+}
