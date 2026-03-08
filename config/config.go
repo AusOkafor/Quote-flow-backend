@@ -70,6 +70,7 @@ type Config struct {
 	// WiPay (Caribbean — JMD, TTD, BBD)
 	WiPayAPIURL      string
 	WiPayEnvironment string
+	WiPaySandbox     bool // true = bypass hash/amount verification (dev); false = enforce (production)
 
 	// Platform fee (0.7%)
 	PlatformFeePercent float64
@@ -118,6 +119,7 @@ func Load() (*Config, error) {
 		PayPalEnvironment:           getEnv("PAYPAL_ENVIRONMENT", "sandbox"),
 		WiPayAPIURL:                 getEnv("WIPAY_API_URL", "https://wipayfinancial.com/api/v1"),
 		WiPayEnvironment:            getEnv("WIPAY_ENVIRONMENT", "sandbox"),
+		WiPaySandbox:                os.Getenv("WIPAY_SANDBOX") == "true",
 		PlatformFeePercent:          0.007,
 	}
 
