@@ -1747,6 +1747,12 @@ func (db *DB) SaveWiPayAccount(ctx context.Context, userID, accountNumber, apiKe
 	return nil
 }
 
+// GetWiPayAccountByUserID looks up the WiPay account for a user (for webhook verification).
+// Returns the account with decrypted API key, or error if not found.
+func (db *DB) GetWiPayAccountByUserID(ctx context.Context, userID string) (*models.PaymentAccountFull, error) {
+	return db.GetPaymentAccountFull(ctx, userID, "wipay")
+}
+
 // GetWiPayAccountByNumber looks up a WiPay account by account number (for webhook verification).
 // Returns the account with decrypted API key, or error if not found.
 func (db *DB) GetWiPayAccountByNumber(ctx context.Context, accountNumber string) (*models.PaymentAccountFull, error) {

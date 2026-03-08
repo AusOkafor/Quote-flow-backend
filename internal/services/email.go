@@ -391,13 +391,6 @@ func paymentReceiptHTML(data PaymentReceiptData, paidTo string) string {
 </table>
 </body>
 </html>`,
-		html.EscapeString(data.ClientName),
-		html.EscapeString(data.ReceiptNumber),
-		html.EscapeString(data.PaymentDate),
-		html.EscapeString(data.Amount),
-		html.EscapeString(data.PaymentType),
-		html.EscapeString(data.Processor),
-		html.EscapeString(data.TransactionID),
 		headerRow,
 		html.EscapeString(data.ClientName),
 		html.EscapeString(data.ReceiptNumber),
