@@ -2255,6 +2255,8 @@ func (h *Handler) PublicGetQuote(w http.ResponseWriter, r *http.Request) {
 		StripeConnected      bool    `json:"stripe_connected,omitempty"`
 		WiPayConnected      bool    `json:"wipay_connected,omitempty"`
 		PayPalConnected      bool    `json:"paypal_connected,omitempty"`
+		TaxType              string  `json:"tax_type,omitempty"`
+		TaxNumber            string  `json:"tax_number,omitempty"`
 	}
 	out := struct {
 		models.QuoteWithDetails
@@ -2276,6 +2278,8 @@ func (h *Handler) PublicGetQuote(w http.ResponseWriter, r *http.Request) {
 			StripeConnected:      stripeConnected,
 			WiPayConnected:      wipayConnected,
 			PayPalConnected:      paypalConnected,
+			TaxType:              profile.TaxType,
+			TaxNumber:            profile.TaxNumber,
 		}
 	}
 	h.ok(w, &out)
