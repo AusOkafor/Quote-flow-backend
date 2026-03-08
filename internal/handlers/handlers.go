@@ -1376,15 +1376,16 @@ func (h *Handler) WiPayAppRedirect(w http.ResponseWriter, r *http.Request) {
 // GET /webhooks/wipay — WiPay sends webhook as GET with query string parameters.
 // Public endpoint — no JWT. Verified via MD5 hash instead.
 func (h *Handler) WiPayWebhook(w http.ResponseWriter, r *http.Request) {
+	// Step 1 — Extract params
 	status := r.URL.Query().Get("status")
 	orderID := r.URL.Query().Get("order_id")
 	transactionID := r.URL.Query().Get("transaction_id")
 	hash := r.URL.Query().Get("hash")
-	total := r.URL.Query().Get("total")
-	currency := r.URL.Query().Get("currency")
+	totalStr := r.URL.Query().Get("total")
+	accountNumber := r.URL.Query().Get("account_number")
 
-	log.Printf("[WiPay] webhook received: status=%s order_id=%s transaction_id=%s total=%s %s",
-		status, orderID, transactionID, total, currency)
+	log.Printf("[WiPay] webhook received: status=%s order_id=%s transaction_id=%s total=%s",
+		status, orderID, transactionID, totalStr)
 
 	if status != "success" {
 		log.Printf("[WiPay] webhook: non-success status=%s — ignoring", status)
@@ -1392,9 +1393,47 @@ func (h *Handler) WiPayWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Step 2 — HASH VERIFICATION FIRST (before any DB lookup) — production only
+	if !h.cfg.WiPaySandbox {
+		if transactionID == "" || hash == "" {
+			log.Printf("[WiPay] webhook: missing transaction_id or hash — rejected")
+			http.Error(w, "invalid signature", http.StatusUnauthorized)
+			return
+		}
+		if accountNumber == "" {
+			log.Printf("[WiPay] webhook: missing account_number — rejected")
+			http.Error(w, "invalid signature", http.StatusUnauthorized)
+			return
+		}
+
+		account, err := h.db.GetWiPayAccountByNumber(r.Context(), accountNumber)
+		if err != nil {
+			log.Printf("[WiPay] webhook: account not found for %s — rejected: %v", accountNumber, err)
+			http.Error(w, "invalid signature", http.StatusUnauthorized)
+			return
+		}
+
+		expectedHash := fmt.Sprintf("%x", md5.Sum([]byte(transactionID+account.WiPayAPIKey)))
+		if !strings.EqualFold(hash, expectedHash) {
+			log.Printf("[WiPay] webhook: hash mismatch REJECTED got=%s expected=%s",
+				hash, expectedHash)
+			http.Error(w, "invalid signature", http.StatusUnauthorized)
+			return
+		}
+		log.Printf("[WiPay] webhook: hash verified ok")
+
+		// Step 3 — AMOUNT VALIDATION (parse only; DB amount check after lookup)
+		if _, err := strconv.ParseFloat(totalStr, 64); err != nil {
+			log.Printf("[WiPay] webhook: invalid amount total=%q — rejected", totalStr)
+			http.Error(w, "invalid amount", http.StatusBadRequest)
+			return
+		}
+	}
+
+	// Step 4 — Look up payment (only after hash verified in production)
 	if orderID == "" {
 		log.Printf("[WiPay] webhook: missing order_id")
-		w.WriteHeader(http.StatusBadRequest)
+		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
 	}
 
@@ -1405,10 +1444,10 @@ func (h *Handler) WiPayWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Verify amount — prevent bad actor from confirming with lower amount
-	webhookAmount, err := strconv.ParseFloat(total, 64)
+	// Step 5 — Amount verification (prevent lower-amount confirmation)
+	webhookAmount, err := strconv.ParseFloat(totalStr, 64)
 	if err != nil {
-		log.Printf("[WiPay] webhook: invalid amount in webhook total=%q", total)
+		log.Printf("[WiPay] webhook: invalid amount in webhook total=%q", totalStr)
 		http.Error(w, "invalid amount", http.StatusBadRequest)
 		return
 	}
@@ -1421,37 +1460,6 @@ func (h *Handler) WiPayWebhook(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Verify hash — WiPay sends MD5(transaction_id + api_key) in "hash" field
-	account, err := h.db.GetPaymentAccountFull(r.Context(), payment.UserID, "wipay")
-	if err != nil || account == nil || account.WiPayAPIKey == "" {
-		log.Printf("[WiPay] webhook: cannot get account for hash verification: %v", err)
-		if !h.cfg.WiPaySandbox {
-			http.Error(w, "invalid signature", http.StatusUnauthorized)
-			return
-		}
-	} else if transactionID != "" && hash != "" {
-		apiKey := account.WiPayAPIKey // GetPaymentAccountFull returns decrypted
-		if !verifyWiPayHash(transactionID, apiKey, hash) {
-			expectedHash := fmt.Sprintf("%x", md5.Sum([]byte(transactionID+apiKey)))
-			if h.cfg.WiPaySandbox {
-				log.Printf("[WiPay] webhook: hash mismatch (sandbox — continuing) got=%s expected=%s",
-					hash, expectedHash)
-			} else {
-				log.Printf("[WiPay] webhook: hash mismatch REJECTED got=%s expected=%s",
-					hash, expectedHash)
-				http.Error(w, "invalid signature", http.StatusUnauthorized)
-				return
-			}
-		} else {
-			log.Printf("[WiPay] webhook: hash verified OK")
-		}
-	} else if !h.cfg.WiPaySandbox {
-		log.Printf("[WiPay] webhook: missing transaction_id or hash in production")
-		http.Error(w, "invalid signature", http.StatusUnauthorized)
-		return
-	}
-
-	// Hash and amount verified (or sandbox bypass)
 	if transactionID != "" {
 		_ = h.db.UpdatePaymentProcessorID(r.Context(), payment.ID, transactionID)
 	}

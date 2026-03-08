@@ -1747,6 +1747,45 @@ func (db *DB) SaveWiPayAccount(ctx context.Context, userID, accountNumber, apiKe
 	return nil
 }
 
+// GetWiPayAccountByNumber looks up a WiPay account by account number (for webhook verification).
+// Returns the account with decrypted API key, or error if not found.
+func (db *DB) GetWiPayAccountByNumber(ctx context.Context, accountNumber string) (*models.PaymentAccountFull, error) {
+	if accountNumber == "" {
+		return nil, fmt.Errorf("account number required")
+	}
+	raw, _, err := db.client.From("payment_accounts").
+		Select("*", "exact", false).
+		Eq("processor", "wipay").
+		Eq("is_active", "true").
+		Execute()
+	if err != nil {
+		return nil, fmt.Errorf("list wipay accounts: %w", err)
+	}
+	var rows []models.PaymentAccountFull
+	if err := decode(raw, &rows); err != nil {
+		return nil, err
+	}
+	for i := range rows {
+		acc := &rows[i]
+		decrypted := acc.WiPayAccountID
+		if db.cfg.EncryptionKey != "" && acc.WiPayAccountID != "" {
+			if dec, err := services.Decrypt(acc.WiPayAccountID, db.cfg.EncryptionKey); err == nil {
+				decrypted = dec
+			}
+		}
+		if decrypted == accountNumber {
+			// Decrypt API key for hash verification
+			if db.cfg.EncryptionKey != "" && acc.WiPayAPIKey != "" {
+				if dec, err := services.Decrypt(acc.WiPayAPIKey, db.cfg.EncryptionKey); err == nil {
+					acc.WiPayAPIKey = dec
+				}
+			}
+			return acc, nil
+		}
+	}
+	return nil, fmt.Errorf("wipay account not found for number %s", accountNumber)
+}
+
 // ListPaymentProcessorsForCurrency returns processors available for the given currency.
 // JMD/TTD/BBD → WiPay only; USD → Stripe or PayPal.
 func (db *DB) ListPaymentProcessorsForCurrency(ctx context.Context, userID, currency string) []string {
