@@ -2,7 +2,6 @@ package digest
 
 import (
 	"context"
-	"fmt"
 	"log"
 	"strings"
 	"time"
