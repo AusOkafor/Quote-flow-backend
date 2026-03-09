@@ -976,7 +976,7 @@ func (h *Handler) WiPayCheckout(w http.ResponseWriter, r *http.Request) {
 	// This bypasses all CORS issues — the browser submits directly to WiPay's domain.
 	// Form opens WiPay in new tab so this page stays open; meta refresh returns to quote after 30s.
 	fallbackURL := strings.TrimSuffix(h.cfg.FrontendURL, "/") + "/q/" + token
-	html := fmt.Sprintf(`<!DOCTYPE html>
+	htmlDoc := fmt.Sprintf(`<!DOCTYPE html>
 <html>
 <head>
     <title>Opening WiPay...</title>
@@ -1036,8 +1036,8 @@ func (h *Handler) WiPayCheckout(w http.ResponseWriter, r *http.Request) {
     </script>
 </body>
 </html>`,
-		fallbackURL,
-		formData.Endpoint,
+		html.EscapeString(fallbackURL),
+		html.EscapeString(formData.Endpoint),
 		html.EscapeString(formData.AccountNumber),
 		html.EscapeString(formData.AVS),
 		html.EscapeString(formData.CountryCode),
@@ -1052,19 +1052,22 @@ func (h *Handler) WiPayCheckout(w http.ResponseWriter, r *http.Request) {
 		html.EscapeString(formData.Total),
 	)
 
-	// Set cookie so /app can redirect to correct quote when WiPay sends user back
+	// Set cookie so /app can redirect to correct quote when WiPay sends user back.
+	// SameSite=None is required because WiPay redirects from a cross-origin domain.
+	// HttpOnly prevents JS access; Secure enforces HTTPS-only transmission.
 	http.SetCookie(w, &http.Cookie{
 		Name:     "wipay_quote_token",
 		Value:    token,
 		Path:     "/",
 		MaxAge:   600,
-		SameSite: http.SameSiteNoneMode,
+		HttpOnly: true,
 		Secure:   true,
+		SameSite: http.SameSiteNoneMode,
 	})
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(html))
+	w.Write([]byte(htmlDoc)) //nolint:errcheck
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1394,7 +1397,9 @@ func (h *Handler) PayPalWebhook(w http.ResponseWriter, r *http.Request) {
 
 // verifyWiPayHash verifies the MD5 hash WiPay sends in the webhook response.
 // WiPay docs: message = MD5(transaction_id + api_key)
+// MD5 is mandated by the WiPay payment gateway protocol — cannot be replaced.
 func verifyWiPayHash(transactionID, apiKey, receivedHash string) bool {
+	//nolint:gosec // G401: MD5 required by WiPay API specification
 	hash := md5.Sum([]byte(transactionID + apiKey))
 	expected := fmt.Sprintf("%x", hash)
 	return strings.EqualFold(expected, receivedHash)
@@ -1414,8 +1419,9 @@ func (h *Handler) WiPayAppRedirect(w http.ResponseWriter, r *http.Request) {
 			Value:    "",
 			Path:     "/",
 			MaxAge:   -1,
-			SameSite: http.SameSiteNoneMode,
+			HttpOnly: true,
 			Secure:   true,
+			SameSite: http.SameSiteNoneMode,
 		})
 		redirectURL := fmt.Sprintf("%s/q/%s?payment=success&processor=wipay",
 			strings.TrimSuffix(h.cfg.FrontendURL, "/"), cookie.Value)
@@ -1480,6 +1486,7 @@ func (h *Handler) WiPayWebhook(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid signature", http.StatusUnauthorized)
 			return
 		}
+		//nolint:gosec // G401: MD5 required by WiPay API specification
 		expectedHash := fmt.Sprintf("%x", md5.Sum([]byte(transactionID+account.WiPayAPIKey)))
 		if !strings.EqualFold(hash, expectedHash) {
 			log.Printf("[WiPay] webhook: hash mismatch REJECTED got=%s expected=%s", hash, expectedHash)
