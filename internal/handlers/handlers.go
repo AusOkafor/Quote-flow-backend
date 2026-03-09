@@ -616,13 +616,26 @@ func (h *Handler) calculatePlatformFee(amount float64, processor models.PaymentP
 	return math.Round(amount*h.cfg.PlatformFeePercent*100) / 100
 }
 
+// calcDeposit parses human-readable deposit strings like "75% upfront", "30% deposit",
+// "100% upfront", "No deposit" and returns the correct deposit amount.
+// The % is always mid-string (never trailing), so we slice up to the % character.
 func calcDeposit(quote *models.QuoteWithDetails) float64 {
-	raw := strings.TrimSuffix(strings.TrimSpace(quote.Deposit), "%")
-	pct, err := strconv.ParseFloat(raw, 64)
-	if err != nil || pct <= 0 || pct > 100 {
-		return math.Round(quote.Total*0.5*100) / 100
+	raw := strings.TrimSpace(quote.Deposit)
+	idx := strings.Index(raw, "%")
+	if idx > 0 {
+		numStr := strings.TrimSpace(raw[:idx])
+		pct, err := strconv.ParseFloat(numStr, 64)
+		if err == nil && pct > 0 && pct <= 100 {
+			depositAmount := math.Round(quote.Total*(pct/100)*100) / 100
+			log.Printf("[deposit] quote_id=%s deposit_str=%q quote_total=%.2f deposit_pct=%.2f deposit_amount=%.2f",
+				quote.ID, quote.Deposit, quote.Total, pct, depositAmount)
+			return depositAmount
+		}
 	}
-	return math.Round(quote.Total*(pct/100)*100) / 100
+	// "No deposit" or unparseable — default to 50%
+	log.Printf("[deposit] quote_id=%s deposit_str=%q unparseable — defaulting to 50%% of %.2f",
+		quote.ID, quote.Deposit, quote.Total)
+	return math.Round(quote.Total*0.5*100) / 100
 }
 
 // POST /payments/create-link
@@ -917,6 +930,9 @@ func (h *Handler) WiPayCheckout(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+
+	log.Printf("[WiPay] checkout: quote_id=%s payment_type=%s quote_total=%.2f deposit_str=%q amount_to_charge=%.2f currency=%s",
+		quote.ID, paymentType, quote.Total, quote.Deposit, amount, quote.Currency)
 
 	account, err := h.db.GetPaymentAccountFull(r.Context(), quote.UserID, "wipay")
 	if err != nil || account == nil || !account.IsActive {
