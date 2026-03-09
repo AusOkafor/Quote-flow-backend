@@ -621,6 +621,13 @@ func (h *Handler) calculatePlatformFee(amount float64, processor models.PaymentP
 // The % is always mid-string (never trailing), so we slice up to the % character.
 func calcDeposit(quote *models.QuoteWithDetails) float64 {
 	raw := strings.TrimSpace(quote.Deposit)
+
+	// Explicit "No deposit" — no upfront payment required
+	if strings.EqualFold(raw, "no deposit") || raw == "" {
+		log.Printf("[deposit] quote_id=%s deposit_str=%q → 0 (no deposit)", quote.ID, quote.Deposit)
+		return 0
+	}
+
 	idx := strings.Index(raw, "%")
 	if idx > 0 {
 		numStr := strings.TrimSpace(raw[:idx])
@@ -632,8 +639,9 @@ func calcDeposit(quote *models.QuoteWithDetails) float64 {
 			return depositAmount
 		}
 	}
-	// "No deposit" or unparseable — default to 50%
-	log.Printf("[deposit] quote_id=%s deposit_str=%q unparseable — defaulting to 50%% of %.2f",
+
+	// Truly unparseable — default to 50% and log a warning
+	log.Printf("[deposit] WARN quote_id=%s deposit_str=%q unparseable — defaulting to 50%% of %.2f",
 		quote.ID, quote.Deposit, quote.Total)
 	return math.Round(quote.Total*0.5*100) / 100
 }
