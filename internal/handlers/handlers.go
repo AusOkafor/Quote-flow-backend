@@ -1399,8 +1399,8 @@ func (h *Handler) PayPalWebhook(w http.ResponseWriter, r *http.Request) {
 // WiPay docs: message = MD5(transaction_id + api_key)
 // MD5 is mandated by the WiPay payment gateway protocol — cannot be replaced.
 func verifyWiPayHash(transactionID, apiKey, receivedHash string) bool {
-	//nolint:gosec // G401: MD5 required by WiPay API specification
-	hash := md5.Sum([]byte(transactionID + apiKey))
+	//nolint:gosec // G401: MD5 required by WiPay API specification — cannot be changed
+	hash := md5.Sum([]byte(transactionID + apiKey)) // lgtm[go/weak-cryptographic-algorithm]
 	expected := fmt.Sprintf("%x", hash)
 	return strings.EqualFold(expected, receivedHash)
 }
@@ -1486,8 +1486,8 @@ func (h *Handler) WiPayWebhook(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid signature", http.StatusUnauthorized)
 			return
 		}
-		//nolint:gosec // G401: MD5 required by WiPay API specification
-		expectedHash := fmt.Sprintf("%x", md5.Sum([]byte(transactionID+account.WiPayAPIKey)))
+		//nolint:gosec // G401: MD5 required by WiPay API specification — cannot be changed
+		expectedHash := fmt.Sprintf("%x", md5.Sum([]byte(transactionID+account.WiPayAPIKey))) // lgtm[go/weak-cryptographic-algorithm]
 		if !strings.EqualFold(hash, expectedHash) {
 			log.Printf("[WiPay] webhook: hash mismatch REJECTED got=%s expected=%s", hash, expectedHash)
 			http.Error(w, "invalid signature", http.StatusUnauthorized)
